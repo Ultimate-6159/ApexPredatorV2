@@ -12,7 +12,9 @@ from datetime import datetime
 import MetaTrader5 as mt5
 import numpy as np
 import pandas as pd
-import pandas_ta as ta
+from ta.momentum import RSIIndicator
+from ta.volatility import BollingerBands, AverageTrueRange
+from ta.trend import EMAIndicator, ADXIndicator
 from dotenv import load_dotenv
 
 from config import (
@@ -122,46 +124,35 @@ class PerceptionEngine:
         feat = pd.DataFrame(index=df.index)
 
         # 1. RSI Fast & Slow
-        feat["rsi_fast"] = ta.rsi(df["Close"], length=RSI_FAST_PERIOD)
-        feat["rsi_slow"] = ta.rsi(df["Close"], length=RSI_SLOW_PERIOD)
+        feat["rsi_fast"] = RSIIndicator(df["Close"], window=RSI_FAST_PERIOD).rsi()
+        feat["rsi_slow"] = RSIIndicator(df["Close"], window=RSI_SLOW_PERIOD).rsi()
 
         # 2. Bollinger Band Width (normalised)
-        bb = ta.bbands(df["Close"], length=BB_PERIOD, std=BB_STD)
-        if bb is not None:
-            upper_col = f"BBU_{BB_PERIOD}_{BB_STD}"
-            lower_col = f"BBL_{BB_PERIOD}_{BB_STD}"
-            mid_col = f"BBM_{BB_PERIOD}_{BB_STD}"
-            feat["bb_width"] = (bb[upper_col] - bb[lower_col]) / bb[mid_col]
-        else:
-            feat["bb_width"] = 0.0
+        bb = BollingerBands(df["Close"], window=BB_PERIOD, window_dev=int(BB_STD))
+        bb_upper = bb.bollinger_hband()
+        bb_lower = bb.bollinger_lband()
+        bb_mid = bb.bollinger_mavg()
+        feat["bb_width"] = (bb_upper - bb_lower) / bb_mid
 
         # 3. Distance to EMA 50 / 200 (% from close)
-        ema50 = ta.ema(df["Close"], length=EMA_FAST)
-        ema200 = ta.ema(df["Close"], length=EMA_SLOW)
+        ema50 = EMAIndicator(df["Close"], window=EMA_FAST).ema_indicator()
+        ema200 = EMAIndicator(df["Close"], window=EMA_SLOW).ema_indicator()
         feat["dist_ema50"] = (df["Close"] - ema50) / ema50 * 100
         feat["dist_ema200"] = (df["Close"] - ema200) / ema200 * 100
 
         # 4. ADX, +DI, -DI
-        adx_df = ta.adx(df["High"], df["Low"], df["Close"], length=ADX_PERIOD)
-        if adx_df is not None:
-            feat["adx"] = adx_df[f"ADX_{ADX_PERIOD}"]
-            feat["plus_di"] = adx_df[f"DMP_{ADX_PERIOD}"]
-            feat["minus_di"] = adx_df[f"DMN_{ADX_PERIOD}"]
-        else:
-            feat["adx"] = 0.0
-            feat["plus_di"] = 0.0
-            feat["minus_di"] = 0.0
+        adx_ind = ADXIndicator(df["High"], df["Low"], df["Close"], window=ADX_PERIOD)
+        feat["adx"] = adx_ind.adx()
+        feat["plus_di"] = adx_ind.adx_pos()
+        feat["minus_di"] = adx_ind.adx_neg()
 
         # 5. ATR (normalised by close)
-        atr = ta.atr(df["High"], df["Low"], df["Close"], length=ATR_PERIOD)
-        feat["atr_norm"] = atr / df["Close"] * 100 if atr is not None else 0.0
+        atr = AverageTrueRange(df["High"], df["Low"], df["Close"], window=ATR_PERIOD).average_true_range()
+        feat["atr_norm"] = atr / df["Close"] * 100
 
         # 6. Volatility Ratio = current ATR / 50-bar rolling mean ATR
-        if atr is not None:
-            atr_ma = atr.rolling(50).mean()
-            feat["volatility_ratio"] = atr / atr_ma
-        else:
-            feat["volatility_ratio"] = 1.0
+        atr_ma = atr.rolling(50).mean()
+        feat["volatility_ratio"] = atr / atr_ma
 
         # 7. Tick Volume normalised (z-score over rolling 50 bars)
         vol_mean = df["Volume"].rolling(50).mean()
@@ -172,10 +163,7 @@ class PerceptionEngine:
         feat["close_return"] = df["Close"].pct_change() * 100
 
         # 9. EMA 50 / 200 crossover signal (binary)
-        if ema50 is not None and ema200 is not None:
-            feat["ema_cross"] = np.where(ema50 > ema200, 1.0, -1.0)
-        else:
-            feat["ema_cross"] = 0.0
+        feat["ema_cross"] = np.where(ema50 > ema200, 1.0, -1.0)
 
         feat.dropna(inplace=True)
         return feat
