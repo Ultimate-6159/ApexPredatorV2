@@ -3,13 +3,17 @@ Apex Predator V2 — Global Configuration & Settings
 All tunable parameters are defined here as constants.
 """
 
+import os
 from enum import Enum
 
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ──────────────────────────────────────────────
 # Market / Symbol
 # ──────────────────────────────────────────────
-SYMBOL: str = "XAUUSD"
+SYMBOL: str = os.getenv("MT5_SYMBOL", "XAUUSD")
 TIMEFRAME_NAME: str = "M5"       # Primary timeframe label
 LOOKBACK_BARS: int = 300         # Bars to fetch for feature calculation
 
