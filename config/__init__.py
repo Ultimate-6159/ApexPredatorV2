@@ -89,3 +89,11 @@ ATR_TP_MULTIPLIER: dict[Regime, float] = {
 # ──────────────────────────────────────────────
 TRAINING_TIMESTEPS: int = 200_000
 MODEL_DIR: str = "models"
+
+# ──────────────────────────────────────────────
+# Training Logging
+# ──────────────────────────────────────────────
+TRAINING_LOG_DIR: str = "logs/training"
+TRAINING_LOG_FREQ: int = 1000        # Log every N steps
+TRAINING_SAVE_FREQ: int = 10000      # Save logs every N steps
+ENABLE_DETAILED_LOGGING: bool = True # Enable comprehensive logging

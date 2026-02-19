@@ -107,12 +107,16 @@ ApexPredatorV2/
 │       └── trading_env.py   # Gymnasium environment
 ├── training/
 │   ├── __init__.py
-│   └── train_agents.py      # Training pipeline (live MT5)
+│   ├── train_agents.py      # Training pipeline (live MT5)
+│   └── training_logger.py   # Training history & metrics logging
 ├── scripts/
 │   ├── __init__.py
 │   ├── run_backtest.py      # Run historical backtest
 │   ├── collect_data.py      # Download data for offline use
-│   └── train_offline.py     # Train from saved data
+│   ├── train_offline.py     # Train from saved data
+│   └── analyze_training.py  # Analyze training logs
+├── logs/
+│   └── training/            # Training logs per regime/session
 ├── data/                    # Historical data storage
 ├── models/                  # Saved model weights (.zip)
 ├── main.py                  # Live trading entry point
@@ -176,13 +180,26 @@ python -m scripts.collect_data --bars 50000 --output data/xauusd.parquet
 python -m scripts.train_offline --data data/xauusd.parquet --timesteps 200000
 ```
 
-### 4. Run Backtest
+### 4. Analyze Training Logs
+
+```bash
+# List all training sessions
+python -m scripts.analyze_training --all
+
+# Analyze specific session
+python -m scripts.analyze_training --regime trending_up --session 20240115_143052
+
+# Compare sessions for a regime
+python -m scripts.analyze_training --regime trending_up --compare
+```
+
+### 5. Run Backtest
 
 ```bash
 python -m scripts.run_backtest --bars 5000 --balance 10000
 ```
 
-### 5. Live Trading
+### 6. Live Trading
 
 ```bash
 python main.py
@@ -202,6 +219,53 @@ python main.py
 | `CONSECUTIVE_LOSS_LIMIT` | `5` | Losses before circuit breaker |
 | `HALT_MINUTES` | `30` | Circuit breaker duration |
 | `TRAINING_TIMESTEPS` | `200,000` | RL training steps |
+| `TRAINING_LOG_FREQ` | `1,000` | Log every N training steps |
+| `TRAINING_SAVE_FREQ` | `10,000` | Save logs every N steps |
+
+## 📊 Training Logs & Analysis
+
+During training, the system automatically saves comprehensive logs for retrospective analysis:
+
+### Log Files Structure
+
+```
+logs/training/
+├── trending_up/
+│   └── 20240115_143052/      # Session ID (timestamp)
+│       ├── config.json       # Training configuration
+│       ├── summary.json      # Final training summary
+│       ├── episodes.parquet  # Episode rewards & lengths
+│       ├── episodes.csv      # Same data in CSV format
+│       ├── timesteps.parquet # Detailed per-timestep metrics
+│       ├── obs_stats.json    # Observation statistics
+│       └── episode_actions.json  # Action distribution per episode
+├── trending_down/
+├── mean_reverting/
+└── high_volatility/
+```
+
+### Logged Information
+
+| Category | Data Logged |
+|----------|-------------|
+| **Episode Metrics** | Rewards, lengths, cumulative performance |
+| **Action Distribution** | % of HOLD/BUY/SELL per episode |
+| **Learning Progress** | Policy loss, value loss, entropy |
+| **Observation Stats** | Feature means, std, min, max |
+| **Training Summary** | Duration, total episodes, best/worst rewards |
+
+### Analyze Training History
+
+```bash
+# List all training sessions
+python -m scripts.analyze_training --all
+
+# Detailed analysis of a session
+python -m scripts.analyze_training --regime trending_up --session 20240115_143052
+
+# Compare all sessions for a regime
+python -m scripts.analyze_training --regime trending_up --compare
+```
 
 ## 🤖 Development Guidelines
 

@@ -7,13 +7,17 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.base_class import BaseAlgorithm
+from stable_baselines3.common.callbacks import CallbackList
 
 from config import MODEL_DIR, TRAINING_TIMESTEPS, Regime
+
+if TYPE_CHECKING:
+    from training.training_logger import TrainingLogger
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +49,29 @@ class BaseAgent:
         return os.path.join(MODEL_DIR, f"{self.regime.value.lower()}.zip")
 
     # ── Training ──────────────────────────────────
-    def train(self, env: Any, timesteps: int = TRAINING_TIMESTEPS) -> None:
+    def train(
+        self,
+        env: Any,
+        timesteps: int = TRAINING_TIMESTEPS,
+        enable_logging: bool = True,
+        log_freq: int = 1000,
+        save_freq: int = 10000,
+    ) -> None:
+        """Train the agent on the given environment.
+
+        Parameters
+        ----------
+        env : gym.Env
+            The training environment.
+        timesteps : int
+            Total training timesteps.
+        enable_logging : bool
+            Whether to enable detailed training logging.
+        log_freq : int
+            Frequency of logging (every N steps).
+        save_freq : int
+            Frequency of saving logs to file (every N steps).
+        """
         logger.info("Training %s for %d timesteps …", self.regime.value, timesteps)
         self.model = self.algo_cls(
             "MlpPolicy",
@@ -53,7 +79,24 @@ class BaseAgent:
             verbose=1,
             **self.algo_kwargs,
         )
-        self.model.learn(total_timesteps=timesteps)
+
+        # Setup callbacks
+        callbacks = []
+        if enable_logging:
+            # Lazy import to avoid circular imports
+            from training.training_logger import TrainingLogger
+
+            training_logger = TrainingLogger(
+                regime=self.regime,
+                log_freq=log_freq,
+                save_freq=save_freq,
+                verbose=1,
+            )
+            callbacks.append(training_logger)
+
+        callback_list = CallbackList(callbacks) if callbacks else None
+
+        self.model.learn(total_timesteps=timesteps, callback=callback_list)
         self.save()
 
     # ── Persistence ───────────────────────────────

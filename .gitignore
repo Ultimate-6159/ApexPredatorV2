@@ -20,6 +20,11 @@ data/*.parquet
 data/*.csv
 !data/.gitkeep
 
+# Training logs (can be large)
+logs/
+!logs/.gitkeep
+*.log
+
 # IDE
 .vscode/
 .idea/
@@ -28,10 +33,6 @@ data/*.csv
 # OS
 .DS_Store
 Thumbs.db
-
-# Logs
-logs/
-*.log
 
 # Jupyter
 .ipynb_checkpoints/
