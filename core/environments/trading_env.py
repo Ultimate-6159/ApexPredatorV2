@@ -34,7 +34,6 @@ logger = logging.getLogger(__name__)
 _TP_REWARD: float = 1.0
 _SL_PENALTY: float = -1.0
 _TIMESTOP_PENALTY: float = -0.5
-_HOLD_FLAT_PENALTY: float = -0.001
 _ATR_PERIOD: int = 14
 
 # Exit-strategy rewards (v2)
@@ -47,6 +46,31 @@ _CLOSE_PROFIT_BONUS: dict[Regime, float] = {
     Regime.MEAN_REVERTING:  3.0,            # Range Sniper: 3× (scalp → take profit ASAP)
     Regime.HIGH_VOLATILITY: 2.0,            # Vol Assassin: 2×
 }
+
+# Entry cost — simulates spread/commission, discourages overtrading
+_ENTRY_COST: dict[Regime, float] = {
+    Regime.TRENDING_UP:     -0.02,          # Low — trends reward holding
+    Regime.TRENDING_DOWN:   -0.02,          # Low — trends reward holding
+    Regime.MEAN_REVERTING:  -0.15,          # High — sniper must be selective
+    Regime.HIGH_VOLATILITY: -0.05,          # Medium
+}
+
+# Hold-while-flat reward per regime (replaces global _HOLD_FLAT_PENALTY)
+_HOLD_FLAT_REWARD: dict[Regime, float] = {
+    Regime.TRENDING_UP:     -0.001,         # Slight penalty — should enter trends
+    Regime.TRENDING_DOWN:   -0.001,         # Slight penalty — should enter trends
+    Regime.MEAN_REVERTING:   0.01,          # Patience reward — wait for edge
+    Regime.HIGH_VOLATILITY: -0.001,         # Slight penalty
+}
+
+# Cooldown: min bars between closing and re-opening
+_COOLDOWN_BARS: dict[Regime, int] = {
+    Regime.TRENDING_UP:     0,              # No cooldown for trends
+    Regime.TRENDING_DOWN:   0,              # No cooldown for trends
+    Regime.MEAN_REVERTING:  3,              # Must wait 3 bars after closing
+    Regime.HIGH_VOLATILITY: 1,              # Must wait 1 bar
+}
+_COOLDOWN_PENALTY: float = -0.3             # Extra cost for re-entering during cooldown
 
 
 class TradingEnv(gym.Env):
@@ -95,6 +119,9 @@ class TradingEnv(gym.Env):
         self.sl_mult = ATR_SL_MULTIPLIER
         self.tp_mult = ATR_TP_MULTIPLIER[regime]
         self.close_bonus = _CLOSE_PROFIT_BONUS[regime]
+        self.entry_cost = _ENTRY_COST[regime]
+        self.hold_flat_reward = _HOLD_FLAT_REWARD[regime]
+        self.cooldown_bars = _COOLDOWN_BARS[regime]
 
         # Pre-compute rolling ATR (same as backtest engine)
         hl_range = (self.ohlcv["High"] - self.ohlcv["Low"]).rolling(_ATR_PERIOD).mean()
@@ -111,6 +138,7 @@ class TradingEnv(gym.Env):
         self._tp: float = 0.0
         self._hold_counter: int = 0
         self._peak_unrealised: float = 0.0  # Track max profit for trailing logic
+        self._bars_since_close: int = 0     # Cooldown counter (bars since last close)
         self._done: bool = False
 
     # ── Gym API ───────────────────────────────────
@@ -126,6 +154,7 @@ class TradingEnv(gym.Env):
         self._tp = 0.0
         self._hold_counter = 0
         self._peak_unrealised = 0.0
+        self._bars_since_close = self.cooldown_bars + 1  # No penalty on first trade
         self._done = False
         return self._get_obs(), {}
 
@@ -167,6 +196,7 @@ class TradingEnv(gym.Env):
         self._tp = 0.0
         self._hold_counter = 0
         self._peak_unrealised = 0.0
+        self._bars_since_close = 0          # Start cooldown timer
 
     def _check_tp_sl(self, high: float, low: float) -> str | None:
         """Check whether the current bar's high/low triggers TP or SL."""
@@ -257,6 +287,8 @@ class TradingEnv(gym.Env):
             return reward
 
         # ── Flat — open new position ──
+        self._bars_since_close += 1
+
         if action == ACTION_BUY:
             self._position = 1
             self._entry_price = price
@@ -264,6 +296,9 @@ class TradingEnv(gym.Env):
             self._hold_counter = 0
             self._sl = price - atr * self.sl_mult
             self._tp = price + atr * self.tp_mult
+            reward = self.entry_cost
+            if self._bars_since_close <= self.cooldown_bars:
+                reward += _COOLDOWN_PENALTY
         elif action == ACTION_SELL:
             self._position = -1
             self._entry_price = price
@@ -271,8 +306,11 @@ class TradingEnv(gym.Env):
             self._hold_counter = 0
             self._sl = price + atr * self.sl_mult
             self._tp = price - atr * self.tp_mult
+            reward = self.entry_cost
+            if self._bars_since_close <= self.cooldown_bars:
+                reward += _COOLDOWN_PENALTY
         else:
-            reward = _HOLD_FLAT_PENALTY
+            reward = self.hold_flat_reward
 
         return reward
 
