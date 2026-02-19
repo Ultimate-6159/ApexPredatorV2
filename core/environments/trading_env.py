@@ -1,6 +1,9 @@
 """
 Custom Gymnasium environment for training specialised RL agents.
 Each agent type gets its own action-space constraints and reward shaping.
+
+The environment simulates ATR-based TP/SL mechanics that mirror the
+backtest engine so the agent learns under realistic conditions.
 """
 
 from __future__ import annotations
@@ -27,9 +30,20 @@ from config import (
 
 logger = logging.getLogger(__name__)
 
+# ── Reward constants ─────────────────────────────
+_TP_REWARD: float = 1.0
+_SL_PENALTY: float = -1.0
+_TIMESTOP_PENALTY: float = -0.5
+_HOLD_FLAT_PENALTY: float = -0.001
+_ATR_PERIOD: int = 14
+
 
 class TradingEnv(gym.Env):
     """A vectorised, single-asset trading environment for one regime.
+
+    The environment now simulates TP/SL using ATR — identical logic to
+    ``BacktestEngine`` — so the agent learns entry timing that produces
+    real TP hits rather than aimless trades.
 
     Parameters
     ----------
@@ -67,12 +81,22 @@ class TradingEnv(gym.Env):
         )
 
         self.max_bars = MAX_HOLDING_BARS[regime]
+        self.sl_mult = ATR_SL_MULTIPLIER
         self.tp_mult = ATR_TP_MULTIPLIER[regime]
+
+        # Pre-compute rolling ATR (same as backtest engine)
+        hl_range = (self.ohlcv["High"] - self.ohlcv["Low"]).rolling(_ATR_PERIOD).mean()
+        self._atr_series: np.ndarray = hl_range.fillna(
+            self.ohlcv["Close"] * 0.01
+        ).values.astype(np.float64)
 
         # Episode state
         self._current_step: int = 0
         self._position: int = 0          # 0=flat, 1=long, -1=short
         self._entry_price: float = 0.0
+        self._entry_atr: float = 0.0
+        self._sl: float = 0.0
+        self._tp: float = 0.0
         self._hold_counter: int = 0
         self._done: bool = False
 
@@ -84,6 +108,9 @@ class TradingEnv(gym.Env):
         self._current_step = 0
         self._position = 0
         self._entry_price = 0.0
+        self._entry_atr = 0.0
+        self._sl = 0.0
+        self._tp = 0.0
         self._hold_counter = 0
         self._done = False
         return self._get_obs(), {}
@@ -110,65 +137,105 @@ class TradingEnv(gym.Env):
         idx = min(self._current_step, len(self.ohlcv) - 1)
         return float(self.ohlcv.loc[idx, "Close"])
 
-    def _current_atr(self) -> float:
-        """Rough ATR proxy from OHLCV high-low of current bar."""
+    def _current_high_low(self) -> tuple[float, float]:
         idx = min(self._current_step, len(self.ohlcv) - 1)
-        return float(self.ohlcv.loc[idx, "High"] - self.ohlcv.loc[idx, "Low"])
+        return float(self.ohlcv.loc[idx, "High"]), float(self.ohlcv.loc[idx, "Low"])
+
+    def _current_atr(self) -> float:
+        idx = min(self._current_step, len(self._atr_series) - 1)
+        return float(self._atr_series[idx])
+
+    def _reset_position(self) -> None:
+        self._position = 0
+        self._entry_price = 0.0
+        self._entry_atr = 0.0
+        self._sl = 0.0
+        self._tp = 0.0
+        self._hold_counter = 0
+
+    def _check_tp_sl(self, high: float, low: float) -> str | None:
+        """Check whether the current bar's high/low triggers TP or SL."""
+        if self._position == 1:  # Long
+            if low <= self._sl:
+                return "SL_HIT"
+            if high >= self._tp:
+                return "TP_HIT"
+        elif self._position == -1:  # Short
+            if high >= self._sl:
+                return "SL_HIT"
+            if low <= self._tp:
+                return "TP_HIT"
+        return None
 
     def _execute_action(self, action: int) -> float:
         price = self._current_close()
+        atr = self._current_atr()
         reward = 0.0
 
         if self._position != 0:
-            # Already in a trade — check time stop
             self._hold_counter += 1
-            pnl = (price - self._entry_price) * self._position
+            high, low = self._current_high_low()
 
+            # ── 1. Check TP/SL hit (mirrors BacktestEngine) ──
+            hit = self._check_tp_sl(high, low)
+            if hit == "TP_HIT":
+                reward = _TP_REWARD
+                self._reset_position()
+                return reward
+            if hit == "SL_HIT":
+                reward = _SL_PENALTY
+                self._reset_position()
+                return reward
+
+            # ── 2. Time stop ──
             if self._hold_counter >= self.max_bars:
-                reward = pnl - abs(pnl) * 0.1  # penalty for time-out
-                self._position = 0
-                self._entry_price = 0.0
-                self._hold_counter = 0
+                pnl_norm = self._normalised_pnl(price)
+                reward = pnl_norm + _TIMESTOP_PENALTY
+                self._reset_position()
                 return reward
 
-            # Agent chooses HOLD → small time-decay penalty (Range Sniper effect)
-            if action == ACTION_HOLD:
-                reward = -0.01 * self._hold_counter
-                return reward
-
-            # Agent tries to open opposite or close (we treat new signal as close)
+            # ── 3. Agent closes voluntarily (opposite signal) ──
             if (action == ACTION_BUY and self._position == -1) or (
                 action == ACTION_SELL and self._position == 1
             ):
-                reward = pnl
-                self._position = 0
-                self._entry_price = 0.0
-                self._hold_counter = 0
+                reward = self._normalised_pnl(price)
+                self._reset_position()
                 return reward
 
-            # Holding same direction — small reward for trend continuation
-            reward = pnl * 0.01
+            # ── 4. Still holding — tiny unrealised PnL feedback ──
+            reward = self._normalised_pnl(price) * 0.01
             return reward
 
-        # Flat — open new position
+        # ── Flat — open new position ──
         if action == ACTION_BUY:
             self._position = 1
             self._entry_price = price
+            self._entry_atr = atr
             self._hold_counter = 0
+            self._sl = price - atr * self.sl_mult
+            self._tp = price + atr * self.tp_mult
         elif action == ACTION_SELL:
             self._position = -1
             self._entry_price = price
+            self._entry_atr = atr
             self._hold_counter = 0
+            self._sl = price + atr * self.sl_mult
+            self._tp = price - atr * self.tp_mult
         else:
-            reward = -0.001  # tiny penalty for doing nothing to encourage engagement
+            reward = _HOLD_FLAT_PENALTY
 
         return reward
+
+    def _normalised_pnl(self, current_price: float) -> float:
+        """Return PnL normalised by entry ATR so rewards are scale-free."""
+        pnl = (current_price - self._entry_price) * self._position
+        if self._entry_atr > 0:
+            return pnl / self._entry_atr
+        return 0.0
 
     def _close_position(self) -> float:
         if self._position == 0:
             return 0.0
-        pnl = (self._current_close() - self._entry_price) * self._position
-        self._position = 0
-        self._entry_price = 0.0
-        self._hold_counter = 0
-        return pnl
+        reward = self._normalised_pnl(self._current_close())
+        self._reset_position()
+        return reward

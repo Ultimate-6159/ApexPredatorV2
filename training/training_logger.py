@@ -15,6 +15,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.logger import KVWriter
 
 from config import Regime
 
@@ -25,6 +26,33 @@ logger = logging.getLogger(__name__)
 # Log Directory Configuration
 # ──────────────────────────────────────────────
 TRAINING_LOG_DIR: str = "logs/training"
+
+
+class _MetricsCaptureWriter(KVWriter):
+    """
+    Custom SB3 logger output that captures all training metrics
+    (rollout/*, time/*, train/*) emitted by the algorithm at each dump.
+    """
+
+    def __init__(self) -> None:
+        self.metrics_history: list[dict[str, Any]] = []
+
+    def write(
+        self,
+        key_values: dict[str, Any],
+        key_excluded: dict[str, tuple[str, ...]],
+        step: int,
+    ) -> None:
+        entry: dict[str, Any] = {"_step": step}
+        for key, value in key_values.items():
+            try:
+                entry[key] = float(value) if isinstance(value, (int, float, np.number)) else value
+            except (TypeError, ValueError):
+                entry[key] = str(value)
+        self.metrics_history.append(entry)
+
+    def close(self) -> None:
+        pass
 
 
 class TrainingLogger(BaseCallback):
@@ -86,6 +114,9 @@ class TrainingLogger(BaseCallback):
         # Training start time
         self.start_time: datetime | None = None
 
+        # SB3 metrics capture writer (attached in _init_callback)
+        self._metrics_writer: _MetricsCaptureWriter | None = None
+
     def _init_callback(self) -> bool:
         """Initialize callback - create log directory."""
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -103,6 +134,11 @@ class TrainingLogger(BaseCallback):
         with open(self.log_dir / "config.json", "w", encoding="utf-8") as f:
             json.dump(config_info, f, indent=2, ensure_ascii=False)
         
+        # Attach custom metrics writer to SB3 logger
+        self._metrics_writer = _MetricsCaptureWriter()
+        if self.model is not None and hasattr(self.model, "logger"):
+            self.model.logger.output_formats.append(self._metrics_writer)
+
         logger.info("Training logger initialized → %s", self.log_dir)
         return True
 
@@ -139,8 +175,12 @@ class TrainingLogger(BaseCallback):
         # Save at specified frequency
         if self.n_calls % self.save_freq == 0:
             self._save_logs()
-        
+
         return True
+
+    def _on_rollout_end(self) -> None:
+        """Called at the end of each rollout — save logs to prevent data loss."""
+        self._save_logs()
 
     def _on_episode_end(self) -> None:
         """Called when an episode ends."""
@@ -266,7 +306,13 @@ class TrainingLogger(BaseCallback):
         if len(self.episode_actions) > 0:
             with open(self.log_dir / "episode_actions.json", "w", encoding="utf-8") as f:
                 json.dump(self.episode_actions, f, indent=2)
-        
+
+        # Save SB3 training metrics (rollout/*, time/*, train/*)
+        if self._metrics_writer and len(self._metrics_writer.metrics_history) > 0:
+            metrics_df = pd.DataFrame(self._metrics_writer.metrics_history)
+            metrics_df.to_parquet(self.log_dir / "training_metrics.parquet", index=False)
+            metrics_df.to_csv(self.log_dir / "training_metrics.csv", index=False)
+
         logger.info("Logs saved → %s", self.log_dir)
 
     def _on_training_end(self) -> None:
@@ -285,7 +331,7 @@ class TrainingLogger(BaseCallback):
         end_time = datetime.now()
         duration = (end_time - self.start_time).total_seconds() if self.start_time else 0
         
-        summary = {
+        summary: dict[str, Any] = {
             "regime": self.regime.value,
             "session_id": self.session_id,
             "start_time": self.start_time.isoformat() if self.start_time else None,
@@ -298,6 +344,13 @@ class TrainingLogger(BaseCallback):
             "best_episode_reward": float(max(self.episode_rewards)) if self.episode_rewards else 0,
             "worst_episode_reward": float(min(self.episode_rewards)) if self.episode_rewards else 0,
         }
+
+        # Include last captured SB3 training metrics in summary
+        if self._metrics_writer and self._metrics_writer.metrics_history:
+            last = self._metrics_writer.metrics_history[-1]
+            summary["final_training_metrics"] = {
+                k: v for k, v in last.items() if k != "_step"
+            }
         
         with open(self.log_dir / "summary.json", "w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2, ensure_ascii=False)
