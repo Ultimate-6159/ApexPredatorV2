@@ -40,7 +40,13 @@ _ATR_PERIOD: int = 14
 # Exit-strategy rewards (v2)
 _TRAILING_PENALTY: float = -2.0            # Penalise letting profit evaporate
 _TRAILING_DD_THRESHOLD: float = 0.3        # Trigger when 30 % of peak profit lost
-_CLOSE_PROFIT_BONUS: float = 2.0           # 2× multiplier for voluntary profitable close
+_PEAK_BONUS: float = 0.1                   # Small bonus each time profit makes new high
+_CLOSE_PROFIT_BONUS: dict[Regime, float] = {
+    Regime.TRENDING_UP:     2.0,            # Bull Rider: 2× for profitable close
+    Regime.TRENDING_DOWN:   2.5,            # Bear Hunter: 2.5× (shorts must exit faster)
+    Regime.MEAN_REVERTING:  3.0,            # Range Sniper: 3× (scalp → take profit ASAP)
+    Regime.HIGH_VOLATILITY: 2.0,            # Vol Assassin: 2×
+}
 
 
 class TradingEnv(gym.Env):
@@ -88,6 +94,7 @@ class TradingEnv(gym.Env):
         self.max_bars = MAX_HOLDING_BARS[regime]
         self.sl_mult = ATR_SL_MULTIPLIER
         self.tp_mult = ATR_TP_MULTIPLIER[regime]
+        self.close_bonus = _CLOSE_PROFIT_BONUS[regime]
 
         # Pre-compute rolling ATR (same as backtest engine)
         hl_range = (self.ohlcv["High"] - self.ohlcv["Low"]).rolling(_ATR_PERIOD).mean()
@@ -197,6 +204,9 @@ class TradingEnv(gym.Env):
 
             # ── 2. Track peak unrealised PnL ──
             unrealised = self._normalised_pnl(price)
+            peak_bonus = 0.0
+            if unrealised > self._peak_unrealised:
+                peak_bonus = _PEAK_BONUS
             self._peak_unrealised = max(self._peak_unrealised, unrealised)
 
             # ── 3. Trailing penalty: profit dropped >30% from peak ──
@@ -224,7 +234,7 @@ class TradingEnv(gym.Env):
             if action == ACTION_HOLD:
                 pnl_norm = self._normalised_pnl(price)
                 if pnl_norm > 0:
-                    reward = pnl_norm * _CLOSE_PROFIT_BONUS  # 2× bonus
+                    reward = pnl_norm * self.close_bonus
                 else:
                     reward = pnl_norm
                 self._reset_position()
@@ -236,14 +246,14 @@ class TradingEnv(gym.Env):
             ):
                 pnl_norm = self._normalised_pnl(price)
                 if pnl_norm > 0:
-                    reward = pnl_norm * _CLOSE_PROFIT_BONUS
+                    reward = pnl_norm * self.close_bonus
                 else:
                     reward = pnl_norm
                 self._reset_position()
                 return reward
 
-            # ── 8. Still holding — tiny unrealised PnL + time decay ──
-            reward = unrealised * 0.01 + time_penalty
+            # ── 8. Still holding — tiny unrealised PnL + time decay + peak bonus ──
+            reward = unrealised * 0.01 + time_penalty + peak_bonus
             return reward
 
         # ── Flat — open new position ──
