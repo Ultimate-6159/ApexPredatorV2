@@ -37,6 +37,11 @@ _TIMESTOP_PENALTY: float = -0.5
 _HOLD_FLAT_PENALTY: float = -0.001
 _ATR_PERIOD: int = 14
 
+# Exit-strategy rewards (v2)
+_TRAILING_PENALTY: float = -2.0            # Penalise letting profit evaporate
+_TRAILING_DD_THRESHOLD: float = 0.3        # Trigger when 30 % of peak profit lost
+_CLOSE_PROFIT_BONUS: float = 2.0           # 2× multiplier for voluntary profitable close
+
 
 class TradingEnv(gym.Env):
     """A vectorised, single-asset trading environment for one regime.
@@ -98,6 +103,7 @@ class TradingEnv(gym.Env):
         self._sl: float = 0.0
         self._tp: float = 0.0
         self._hold_counter: int = 0
+        self._peak_unrealised: float = 0.0  # Track max profit for trailing logic
         self._done: bool = False
 
     # ── Gym API ───────────────────────────────────
@@ -112,6 +118,7 @@ class TradingEnv(gym.Env):
         self._sl = 0.0
         self._tp = 0.0
         self._hold_counter = 0
+        self._peak_unrealised = 0.0
         self._done = False
         return self._get_obs(), {}
 
@@ -152,6 +159,7 @@ class TradingEnv(gym.Env):
         self._sl = 0.0
         self._tp = 0.0
         self._hold_counter = 0
+        self._peak_unrealised = 0.0
 
     def _check_tp_sl(self, high: float, low: float) -> str | None:
         """Check whether the current bar's high/low triggers TP or SL."""
@@ -187,23 +195,55 @@ class TradingEnv(gym.Env):
                 self._reset_position()
                 return reward
 
-            # ── 2. Time stop ──
+            # ── 2. Track peak unrealised PnL ──
+            unrealised = self._normalised_pnl(price)
+            self._peak_unrealised = max(self._peak_unrealised, unrealised)
+
+            # ── 3. Trailing penalty: profit dropped >30% from peak ──
+            if self._peak_unrealised > 0.1:
+                dd = (self._peak_unrealised - unrealised) / self._peak_unrealised
+                if dd > _TRAILING_DD_THRESHOLD:
+                    reward = _TRAILING_PENALTY
+                    self._reset_position()
+                    return reward
+
+            # ── 4. Time stop ──
             if self._hold_counter >= self.max_bars:
-                pnl_norm = self._normalised_pnl(price)
-                reward = pnl_norm + _TIMESTOP_PENALTY
+                reward = unrealised + _TIMESTOP_PENALTY
                 self._reset_position()
                 return reward
 
-            # ── 3. Agent closes voluntarily (opposite signal) ──
+            # ── 5. Stepped time-decay penalty ──
+            time_penalty = 0.0
+            half = self.max_bars * 0.5
+            if self._hold_counter > half:
+                progress = (self._hold_counter - half) / max(half, 1)
+                time_penalty = -0.05 * (1.0 + progress)  # -0.05 → -0.10
+
+            # ── 6. Voluntary close: HOLD while in position = exit ──
+            if action == ACTION_HOLD:
+                pnl_norm = self._normalised_pnl(price)
+                if pnl_norm > 0:
+                    reward = pnl_norm * _CLOSE_PROFIT_BONUS  # 2× bonus
+                else:
+                    reward = pnl_norm
+                self._reset_position()
+                return reward
+
+            # ── 7. Agent closes via opposite signal ──
             if (action == ACTION_BUY and self._position == -1) or (
                 action == ACTION_SELL and self._position == 1
             ):
-                reward = self._normalised_pnl(price)
+                pnl_norm = self._normalised_pnl(price)
+                if pnl_norm > 0:
+                    reward = pnl_norm * _CLOSE_PROFIT_BONUS
+                else:
+                    reward = pnl_norm
                 self._reset_position()
                 return reward
 
-            # ── 4. Still holding — tiny unrealised PnL feedback ──
-            reward = self._normalised_pnl(price) * 0.01
+            # ── 8. Still holding — tiny unrealised PnL + time decay ──
+            reward = unrealised * 0.01 + time_penalty
             return reward
 
         # ── Flat — open new position ──
