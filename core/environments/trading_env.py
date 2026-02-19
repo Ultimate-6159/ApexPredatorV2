@@ -52,7 +52,7 @@ _ENTRY_COST: dict[Regime, float] = {
     Regime.TRENDING_UP:     -0.02,          # Low — trends reward holding
     Regime.TRENDING_DOWN:   -0.02,          # Low — trends reward holding
     Regime.MEAN_REVERTING:  -0.15,          # High — sniper must be selective
-    Regime.HIGH_VOLATILITY: -0.05,          # Medium
+    Regime.HIGH_VOLATILITY: -0.20,          # High — spreads widen in volatile markets
 }
 
 # Hold-while-flat reward per regime (replaces global _HOLD_FLAT_PENALTY)
@@ -60,7 +60,7 @@ _HOLD_FLAT_REWARD: dict[Regime, float] = {
     Regime.TRENDING_UP:     -0.001,         # Slight penalty — should enter trends
     Regime.TRENDING_DOWN:   -0.001,         # Slight penalty — should enter trends
     Regime.MEAN_REVERTING:   0.01,          # Patience reward — wait for edge
-    Regime.HIGH_VOLATILITY: -0.001,         # Slight penalty
+    Regime.HIGH_VOLATILITY:  0.005,         # Small patience reward — wait for clean setup
 }
 
 # Cooldown: min bars between closing and re-opening
@@ -68,7 +68,7 @@ _COOLDOWN_BARS: dict[Regime, int] = {
     Regime.TRENDING_UP:     0,              # No cooldown for trends
     Regime.TRENDING_DOWN:   0,              # No cooldown for trends
     Regime.MEAN_REVERTING:  3,              # Must wait 3 bars after closing
-    Regime.HIGH_VOLATILITY: 1,              # Must wait 1 bar
+    Regime.HIGH_VOLATILITY: 2,              # Must wait 2 bars — let vol settle
 }
 _COOLDOWN_PENALTY: float = -0.3             # Extra cost for re-entering during cooldown
 
