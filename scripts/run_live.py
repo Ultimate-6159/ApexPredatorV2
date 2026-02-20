@@ -46,6 +46,8 @@ from config import (
     MODEL_DIR,
     SYMBOL,
     TIMEFRAME_NAME,
+    TRAILING_ACTIVATION_POINTS,
+    TRAILING_DRAWDOWN_POINTS,
     TRAINING_LOG_DIR,
     Regime,
 )
@@ -210,6 +212,10 @@ class LiveEngine:
         self._bar_count: int = 0
         self._last_bar_time: int = 0
 
+        # Trailing stop state
+        self._trailing_ticket: int | None = None
+        self._highest_profit_points: float = 0.0
+
     # ── Public Entry Point ────────────────────
     def start(self) -> None:
         """Initialize everything and enter the main loop."""
@@ -330,20 +336,24 @@ class LiveEngine:
             # 1. Sync position state with broker (detect TP/SL hits)
             self._sync_position_state()
 
-            # 2. Fetch fresh OHLCV + features
+            # 2. Trailing stop check (overrides AI)
+            self._check_trailing_stop()
+
+            # 3. Fetch fresh OHLCV + features
             ohlcv = self.perception.fetch_ohlcv()
             features = self.perception.compute_features(ohlcv)
             latest_row = features.iloc[-1]
 
-            # 3. Detect regime  (SRS §3 — Perception)
+            # 4. Detect regime  (SRS §3 — Perception)
             regime = self.router.detect_regime(latest_row)
 
-            # 4. Regime-shift protocol  (SRS §4 — The Clean Slate)
+            # 5. Regime-shift protocol  (SRS §4 — The Clean Slate)
             self._handle_regime_shift(regime)
 
-            # 5. Risk checks
+            # 6. Risk checks
             acct = self.perception.get_account_info()
             balance = acct["balance"]
+            equity = acct["equity"]
 
             if self.risk.check_drawdown(balance):
                 self.log.critical("MAX DRAWDOWN breached — FULL STOP")
@@ -353,31 +363,31 @@ class LiveEngine:
                 self.log.warning("Circuit breaker active — skipping bar")
                 return
 
-            # 6. Time stop check  (SRS §6)
+            # 7. Time stop check  (SRS §6)
             self.risk.update_bar(self._bar_count)
             if self.risk.should_time_stop(self._bar_count):
                 self.executor.close_open_trade("TIME_STOP")
 
-            # 7. Normalize observation  (SRS §2)
+            # 8. Normalize observation  (SRS §2)
             raw_obs = latest_row.values.astype(np.float32)
             agent_data = self.agents[regime]
             obs_normalized = _normalize_obs(raw_obs, agent_data["stats"])
             obs_ready = obs_normalized.reshape(1, -1)
 
-            # 8. Predict action  (SRS §5)
+            # 9. Predict action  (SRS §5)
             action_idx, _ = agent_data["model"].predict(
                 obs_ready, deterministic=True
             )
             raw_action = int(action_idx.item())
 
-            # 9. Map to actual action
+            # 10. Map to actual action
             allowed = AGENT_ACTION_MAP[regime]
             actual_action = allowed[raw_action]
 
-            # 10. Dispatch with position-aware logic  (SRS §5 + §6)
-            self._dispatch_action(actual_action, regime, ohlcv, balance)
+            # 11. Dispatch with position-aware logic  (SRS §5 + §6)
+            self._dispatch_action(actual_action, regime, ohlcv, equity)
 
-            # 11. Log  (SRS §7)
+            # 12. Log  (SRS §7)
             unrealised = acct.get("profit", 0.0)
             self.log.info(
                 "Bar #%d | Regime: %s | Action: %d → %s | "
@@ -392,6 +402,68 @@ class LiveEngine:
 
         except Exception:
             self.log.exception("Error processing bar #%d", self._bar_count)
+
+    # ── Trailing Stop  (Points-Based) ─────────
+    def _check_trailing_stop(self) -> None:
+        """Monitor unrealized profit in points; force close on retrace.
+
+        Activates when profit exceeds TRAILING_ACTIVATION_POINTS.
+        Force closes if profit retraces TRAILING_DRAWDOWN_POINTS from peak.
+        """
+        if not self.risk.has_open_trade:
+            self._trailing_ticket = None
+            self._highest_profit_points = 0.0
+            return
+
+        trade = self.risk.open_trade
+
+        # Reset if tracking a stale ticket
+        if self._trailing_ticket is not None and self._trailing_ticket != trade.ticket:
+            self._trailing_ticket = None
+            self._highest_profit_points = 0.0
+
+        tick = mt5.symbol_info_tick(self.symbol)
+        if tick is None:
+            return
+
+        sym = self.perception.get_symbol_info()
+        point = sym["point"]
+
+        # Profit in points (direction-aware, uses close-side price)
+        if trade.direction == "BUY":
+            profit_pts = (tick.bid - trade.entry_price) / point
+        else:
+            profit_pts = (trade.entry_price - tick.ask) / point
+
+        # 1. Activation
+        if profit_pts >= TRAILING_ACTIVATION_POINTS:
+            if self._trailing_ticket != trade.ticket:
+                self.log.info(
+                    "TRAILING ACTIVATED #%d — profit %.0f pts (threshold %d)",
+                    trade.ticket,
+                    profit_pts,
+                    TRAILING_ACTIVATION_POINTS,
+                )
+                self._trailing_ticket = trade.ticket
+                self._highest_profit_points = profit_pts
+
+        # 2. Execution
+        if self._trailing_ticket == trade.ticket:
+            if profit_pts > self._highest_profit_points:
+                self._highest_profit_points = profit_pts
+
+            drawdown_pts = self._highest_profit_points - profit_pts
+            if drawdown_pts >= TRAILING_DRAWDOWN_POINTS:
+                self.log.warning(
+                    "TRAILING STOP HIT #%d — peak=%.0f, now=%.0f, dd=%.0f pts",
+                    trade.ticket,
+                    self._highest_profit_points,
+                    profit_pts,
+                    drawdown_pts,
+                )
+                self.executor.close_open_trade("TRAILING_STOP")
+                self._trailing_ticket = None
+                self._highest_profit_points = 0.0
 
     # ── Regime Shift  (SRS §4 — The Clean Slate) ─
     def _handle_regime_shift(self, current_regime: Regime) -> None:
@@ -417,7 +489,7 @@ class LiveEngine:
         action: int,
         regime: Regime,
         ohlcv: pd.DataFrame,
-        balance: float,
+        equity: float,
     ) -> None:
         """Translate AI action to MT5 order with position-aware logic.
 
@@ -480,8 +552,9 @@ class LiveEngine:
             price_ask=tick.ask,
             atr=atr,
             point=sym["point"],
-            balance=balance,
-            contract_size=sym["trade_contract_size"],
+            equity=equity,
+            tick_value=sym["trade_tick_value"],
+            tick_size=sym["trade_tick_size"],
             volume_min=sym["volume_min"],
             volume_max=sym["volume_max"],
             volume_step=sym["volume_step"],

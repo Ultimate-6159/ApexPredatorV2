@@ -88,6 +88,10 @@ ATR_TP_MULTIPLIER: dict[Regime, float] = {
     Regime.HIGH_VOLATILITY: 2.0,
 }
 
+# Trailing Stop (Points-based — overrides AI when profit retraces)
+TRAILING_ACTIVATION_POINTS: int = 300   # Activate after 300 points profit
+TRAILING_DRAWDOWN_POINTS: int = 200     # Force close if retraces 200 points from peak
+
 # ──────────────────────────────────────────────
 # Training
 # ──────────────────────────────────────────────

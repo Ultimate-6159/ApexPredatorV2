@@ -193,6 +193,8 @@ class PerceptionEngine:
             "point": info.point,
             "digits": info.digits,
             "trade_contract_size": info.trade_contract_size,
+            "trade_tick_value": info.trade_tick_value,
+            "trade_tick_size": info.trade_tick_size,
             "volume_min": info.volume_min,
             "volume_max": info.volume_max,
             "volume_step": info.volume_step,

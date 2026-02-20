@@ -46,8 +46,9 @@ class ExecutionEngine:
         price_ask: float,
         atr: float,
         point: float,
-        balance: float,
-        contract_size: float,
+        equity: float,
+        tick_value: float,
+        tick_size: float,
         volume_min: float,
         volume_max: float,
         volume_step: float,
@@ -68,7 +69,7 @@ class ExecutionEngine:
         sl, tp = self.risk.calculate_sl_tp(direction, entry_price, atr, regime, point)
         sl_distance = abs(entry_price - sl)
         lot = self.risk.calculate_lot_size(
-            balance, sl_distance, contract_size,
+            equity, sl_distance, tick_value, tick_size,
             volume_min, volume_max, volume_step, point,
         )
 

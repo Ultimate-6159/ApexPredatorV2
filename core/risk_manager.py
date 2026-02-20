@@ -74,22 +74,34 @@ class RiskManager:
     # ── Position Sizing (Anti-Martingale) ─────────
     @staticmethod
     def calculate_lot_size(
-        balance: float,
+        equity: float,
         sl_distance: float,
-        contract_size: float,
+        tick_value: float,
+        tick_size: float,
         volume_min: float,
         volume_max: float,
         volume_step: float,
         point: float,
     ) -> float:
-        """0.5 % risk of current balance per trade — strictly NOT Martingale."""
-        risk_amount = balance * (RISK_PER_TRADE_PCT / 100.0)
+        """Tick-value position sizing — risk % of equity per trade.
+
+        Formula:
+          value_per_point = tick_value × (point / tick_size)
+          raw_lot = risk_amount / (sl_points × value_per_point)
+        """
+        risk_amount = equity * (RISK_PER_TRADE_PCT / 100.0)
 
         if sl_distance <= 0 or point <= 0:
             return volume_min
 
         sl_points = sl_distance / point
-        value_per_point = contract_size * point
+
+        if tick_value > 0 and tick_size > 0:
+            value_per_point = tick_value * point / tick_size
+        else:
+            logger.warning("tick_value/tick_size unavailable — falling back to point")
+            value_per_point = point
+
         if value_per_point <= 0:
             return volume_min
 
