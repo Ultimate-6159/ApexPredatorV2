@@ -89,9 +89,9 @@ Hard-coded logic (strictly NO ML) classifies the current market regime:
 | Regime | Condition | Priority |
 |---|---|---|
 | `HIGH_VOLATILITY` | Volatility Ratio > 1.5 | 1st |
-| `TRENDING_UP` | ADX > 25 & +DI > −DI | 2nd |
-| `TRENDING_DOWN` | ADX > 25 & −DI > +DI | 3rd |
-| `MEAN_REVERTING` | ADX < 25 (fallback) | 4th |
+| `TRENDING_UP` | ADX > 23 & +DI > −DI | 2nd |
+| `TRENDING_DOWN` | ADX > 23 & −DI > +DI | 3rd |
+| `MEAN_REVERTING` | ADX < 23 (fallback) | 4th |
 
 ### Layer 3 — The 4 Specialized Agents (`core/agents/`)
 
@@ -397,9 +397,9 @@ python -m scripts.analyze_live_logs --csv trades.csv
 
 | Parameter | Default | Description |
 |---|---|---|
-| `ADX_TREND_THRESHOLD` | `25.0` | ADX threshold for trending regime |
+| `ADX_TREND_THRESHOLD` | `23.0` | ADX threshold for trending regime |
 | `VOLATILITY_RATIO_THRESHOLD` | `1.5` | ATR ratio threshold for HIGH_VOLATILITY |
-| `ADX_PERIOD` | `14` | ADX calculation period |
+| `ADX_PERIOD` | `10` | ADX calculation period |
 | `ATR_PERIOD` | `14` | ATR calculation period |
 
 ### Risk Management

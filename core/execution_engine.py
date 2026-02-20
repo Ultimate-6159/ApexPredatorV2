@@ -146,9 +146,11 @@ class ExecutionEngine:
         pnl = (close_price - trade.entry_price) if trade.direction == "BUY" else (trade.entry_price - close_price)
         pnl_money = pnl * trade.lot * (mt5.symbol_info(self.symbol).trade_contract_size if mt5.symbol_info(self.symbol) else 1)
         logger.info(
-            "Trade #%d CLOSED (%s) @ %.2f  PnL=%.2f",
+            "Trade #%d CLOSED (%s) [%s %s] @ %.2f  PnL=%.2f",
             trade.ticket,
             reason,
+            trade.direction,
+            trade.regime.value,
             close_price,
             pnl_money,
         )

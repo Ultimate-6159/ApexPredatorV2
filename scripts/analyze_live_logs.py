@@ -55,11 +55,11 @@ _OPEN_RE = re.compile(
 )
 
 _CLOSE_ENGINE_RE = re.compile(
-    r"Trade #(\d+) CLOSED \((\w+)\) @ ([\d.]+)\s+PnL=(-?[\d.]+)"
+    r"Trade #(\d+) CLOSED \((\w+)\)\s+(?:\[(\w+) (\w+)\] )?@ ([\d.]+)\s+PnL=(-?[\d.]+)"
 )
 
 _CLOSE_BROKER_RE = re.compile(
-    r"Trade #(\d+) closed by broker \(([^)]+)\) .+ profit=(-?[\d.]+)"
+    r"Trade #(\d+) closed by broker \(([^)]+)\)\s*(?:\[(\w+) (\w+)\] )?.+ profit=(-?[\d.]+)"
 )
 
 _ACCOUNT_RE = re.compile(
@@ -241,8 +241,10 @@ def parse_logs(log_files: Sequence[Path]) -> DashboardData:
                 if m:
                     ticket = int(m.group(1))
                     reason = m.group(2)
-                    close_price = float(m.group(3))
-                    pnl = float(m.group(4))
+                    direction = m.group(3)  # None for old logs
+                    regime = m.group(4)     # None for old logs
+                    close_price = float(m.group(5))
+                    pnl = float(m.group(6))
 
                     if ticket in pending:
                         trade = pending.pop(ticket)
@@ -254,8 +256,8 @@ def parse_logs(log_files: Sequence[Path]) -> DashboardData:
                     else:
                         data.trades.append(Trade(
                             ticket=ticket,
-                            direction="?",
-                            regime="?",
+                            direction=direction or "?",
+                            regime=regime or "?",
                             lot=0.0,
                             entry_price=0.0,
                             sl=0.0,
@@ -272,7 +274,9 @@ def parse_logs(log_files: Sequence[Path]) -> DashboardData:
                 if m:
                     ticket = int(m.group(1))
                     reason = m.group(2)
-                    pnl = float(m.group(3))
+                    direction = m.group(3)  # None for old logs
+                    regime = m.group(4)     # None for old logs
+                    pnl = float(m.group(5))
 
                     if ticket in pending:
                         trade = pending.pop(ticket)
@@ -283,8 +287,8 @@ def parse_logs(log_files: Sequence[Path]) -> DashboardData:
                     else:
                         data.trades.append(Trade(
                             ticket=ticket,
-                            direction="?",
-                            regime="?",
+                            direction=direction or "?",
+                            regime=regime or "?",
                             lot=0.0,
                             entry_price=0.0,
                             sl=0.0,

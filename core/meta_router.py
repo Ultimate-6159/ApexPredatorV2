@@ -28,9 +28,9 @@ class MetaRouter:
 
         Priority order (first match wins):
         1. HIGH_VOLATILITY  — Volatility Ratio > threshold
-        2. TRENDING_UP      — ADX > 25 *and* +DI > -DI
-        3. TRENDING_DOWN    — ADX > 25 *and* -DI > +DI
-        4. MEAN_REVERTING   — fallback (ADX < 25)
+        2. TRENDING_UP      — ADX > threshold *and* +DI > -DI
+        3. TRENDING_DOWN    — ADX > threshold *and* -DI > +DI
+        4. MEAN_REVERTING   — fallback (ADX < threshold)
         """
         adx: float = float(features.get("adx", 0))
         plus_di: float = float(features.get("plus_di", 0))

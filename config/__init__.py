@@ -20,9 +20,9 @@ LOOKBACK_BARS: int = 300         # Bars to fetch for feature calculation
 # ──────────────────────────────────────────────
 # Regime Detection Thresholds  (Meta-Router)
 # ──────────────────────────────────────────────
-ADX_TREND_THRESHOLD: float = 25.0
+ADX_TREND_THRESHOLD: float = 23.0
 VOLATILITY_RATIO_THRESHOLD: float = 1.5
-ADX_PERIOD: int = 14
+ADX_PERIOD: int = 10
 ATR_PERIOD: int = 14
 RSI_FAST_PERIOD: int = 7
 RSI_SLOW_PERIOD: int = 14

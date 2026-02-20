@@ -667,9 +667,11 @@ class LiveEngine:
             profit = self._get_closed_trade_profit(trade.ticket, trade.open_time)
             reason = "TP/SL_HIT" if profit != 0.0 else "BROKER_CLOSE"
             self.log.info(
-                "Trade #%d closed by broker (%s) — profit=%.2f",
+                "Trade #%d closed by broker (%s) [%s %s] — profit=%.2f",
                 trade.ticket,
                 reason,
+                trade.direction,
+                trade.regime.value,
                 profit,
             )
             self.risk.register_close(profit)
