@@ -171,7 +171,7 @@ Replaces fixed-point trailing (V2: 300/200 points) with ATR-adaptive thresholds.
 
 ## ⚙️ Live Execution Pipeline (`scripts/run_live.py`)
 
-The `LiveEngine` fires once per bar close and executes a 13-step pipeline:
+The `LiveEngine` fires once per bar close and executes a 14-step pipeline:
 
 ```
  1.  Sync position state with broker (detect TP/SL hits)
@@ -184,10 +184,13 @@ The `LiveEngine` fires once per bar close and executes a 13-step pipeline:
  7.  Risk checks (drawdown, circuit breaker)
  8.  Time stop check
  9.  Z-Score normalize observation
-10.  Predict action (PPO model)
-11.  Map to actual action (regime-specific action space)
-12.  Dispatch with position-aware logic (Anti-Martingale)
-13.  Log bar result
+ 9b. Anomaly detection (warn if any feature > 5.0 STD)
+10.  Inference Telemetry — extract action probs + critic value
+11.  Predict action (PPO model, deterministic)
+12.  Map to actual action (regime-specific action space)
+12b. Log telemetry (confidence %, critic value, per-action probs)
+13.  Dispatch with position-aware logic (Anti-Martingale)
+14.  Log bar result
 ```
 
 **Additional features:**
@@ -220,6 +223,7 @@ python -m scripts.analyze_live_logs --csv trades.csv    # export to CSV
 | **Close Reason Breakdown** | TP/SL_HIT, TRAILING_STOP, VOLUNTARY_CLOSE, REGIME_SHIFT, TIME_STOP, … |
 | **Action Distribution** | HOLD / BUY / SELL counts with bar chart |
 | **Regime Distribution** | Bars per regime with bar chart |
+| **AI Inference Telemetry** | Avg/Min/Max Confidence %, Critic Value stats, per-regime confidence, anomaly count |
 | **Recent Trades** | Last 10 trades: ticket, direction, regime, lot, entry, close, PnL, reason |
 
 **Institutional Metric Thresholds:**

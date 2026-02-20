@@ -70,6 +70,16 @@ _REGIME_SHIFT_RE = re.compile(
     r"REGIME SHIFT: (\S+) .+ (\S+)"
 )
 
+_TELEMETRY_RE = re.compile(
+    r"TELEMETRY \| Regime: (\S+) \| "
+    r"Critic Value: ([\d.eE+\-]+|N/A) \| "
+    r"Confidence: ([\d.]+)% \((.+)\)"
+)
+
+_ANOMALY_RE = re.compile(
+    r"ANOMALY DETECTED: Extreme feature value \(([\d.]+) STD\)"
+)
+
 
 # ══════════════════════════════════════════════
 # Data Structures
@@ -100,6 +110,13 @@ class DashboardData:
     regime_shifts: int = 0
     starting_balance: float = 0.0
     ending_balance: float = 0.0
+    # Telemetry
+    confidences: list[float] = field(default_factory=list)
+    critic_values: list[float] = field(default_factory=list)
+    anomaly_count: int = 0
+    regime_confidences: dict[str, list[float]] = field(
+        default_factory=lambda: defaultdict(list)
+    )
 
 
 # ══════════════════════════════════════════════
@@ -290,6 +307,26 @@ def parse_logs(log_files: Sequence[Path]) -> DashboardData:
                 # ── Regime shift ──
                 if _REGIME_SHIFT_RE.search(msg):
                     data.regime_shifts += 1
+                    continue
+
+                # ── Telemetry (inference probabilities + critic value) ──
+                m = _TELEMETRY_RE.search(msg)
+                if m:
+                    regime_t = m.group(1)
+                    cv_str = m.group(2)
+                    conf = float(m.group(3))
+                    data.confidences.append(conf)
+                    data.regime_confidences[regime_t].append(conf)
+                    if cv_str != "N/A":
+                        try:
+                            data.critic_values.append(float(cv_str))
+                        except ValueError:
+                            pass
+                    continue
+
+                # ── Anomaly detection ──
+                if _ANOMALY_RE.search(msg):
+                    data.anomaly_count += 1
                     continue
 
     return data
@@ -595,6 +632,44 @@ def display_dashboard(data: DashboardData) -> None:
         agent_name = _REGIME_AGENT.get(regime, regime)
         bar = "█" * int(pct / 2)
         _kv(f"{agent_name} ({regime})", f"{cnt:>6}  ({pct:5.1f}%)  {bar}")
+
+    # ── AI Inference Telemetry ──
+    if data.confidences:
+        _section("AI INFERENCE TELEMETRY")
+        n_samples = len(data.confidences)
+        avg_conf = sum(data.confidences) / n_samples
+        min_conf = min(data.confidences)
+        max_conf = max(data.confidences)
+
+        _kv("Telemetry Samples", f"{n_samples:,}")
+        _kv("Avg Confidence", f"{avg_conf:.1f}%")
+        _kv("Min / Max Confidence", f"{min_conf:.1f}% / {max_conf:.1f}%")
+
+        if data.critic_values:
+            avg_cv = sum(data.critic_values) / len(data.critic_values)
+            min_cv = min(data.critic_values)
+            max_cv = max(data.critic_values)
+            _kv("Avg Critic Value", f"{avg_cv:+.3f}")
+            _kv("Min / Max Critic Value", f"{min_cv:+.3f} / {max_cv:+.3f}")
+
+        _kv("Anomalies Detected", f"{data.anomaly_count}")
+
+        # Per-regime average confidence
+        if data.regime_confidences:
+            print()
+            print(f"    {'Agent':<22} {'Samples':>8} {'Avg Conf':>10} "
+                  f"{'Min':>8} {'Max':>8}")
+            print(f"    {'─' * 56}")
+            for regime in sorted(data.regime_confidences.keys()):
+                rc = data.regime_confidences[regime]
+                agent_name = _REGIME_AGENT.get(regime, regime)
+                r_avg = sum(rc) / len(rc)
+                r_min = min(rc)
+                r_max = max(rc)
+                print(
+                    f"    {agent_name:<22} {len(rc):>8} "
+                    f"{r_avg:>9.1f}% {r_min:>7.1f}% {r_max:>7.1f}%"
+                )
 
     # ── Recent Trades (last 10) ──
     if trades:

@@ -17,6 +17,7 @@ SRS Requirements Implemented:
 V3 Upgrades:
   8. ATR-Based Dynamic Trailing Stop — adapts to volatility (narrow in ranging, wide in trending)
   9. News Filter — Forex Factory calendar, forces HIGH_VOLATILITY before red events
+ 10. Inference Telemetry — action probabilities, critic value, anomaly detection
 
 Usage:
     python -m scripts.run_live [--timeframe M5] [--symbol XAUUSDm]
@@ -38,6 +39,7 @@ from typing import Any
 import MetaTrader5 as mt5
 import numpy as np
 import pandas as pd
+import torch
 from stable_baselines3 import PPO
 
 from config import (
@@ -408,20 +410,62 @@ class LiveEngine:
             obs_normalized = _normalize_obs(raw_obs, agent_data["stats"])
             obs_ready = obs_normalized.reshape(1, -1)
 
-            # 10. Predict action  (SRS §5)
-            action_idx, _ = agent_data["model"].predict(
+            # 9b. Anomaly detection — flag extreme Z-Score features
+            max_feature_val = float(np.max(np.abs(obs_ready)))
+            if max_feature_val > 5.0:
+                self.log.warning(
+                    "⚠️ ANOMALY DETECTED: Extreme feature value "
+                    "(%.2f STD). AI may act unpredictably!",
+                    max_feature_val,
+                )
+
+            # 10. Inference Telemetry — extract probabilities + critic value
+            agent_model: PPO = agent_data["model"]
+            probs: np.ndarray | None = None
+            critic_value: float | None = None
+
+            try:
+                obs_tensor, _ = agent_model.policy.obs_to_tensor(obs_ready)
+                with torch.no_grad():
+                    dist = agent_model.policy.get_distribution(obs_tensor)
+                    probs = dist.distribution.probs.cpu().numpy()[0]
+                    critic_value = float(
+                        agent_model.policy.predict_values(obs_tensor)
+                        .cpu().numpy()[0][0]
+                    )
+            except Exception:
+                self.log.exception("Telemetry extraction failed")
+
+            # 11. Predict action  (SRS §5)
+            action_idx, _ = agent_model.predict(
                 obs_ready, deterministic=True
             )
             raw_action = int(action_idx.item())
 
-            # 11. Map to actual action
+            # 12. Map to actual action
             allowed = AGENT_ACTION_MAP[regime]
             actual_action = allowed[raw_action]
 
-            # 12. Dispatch with position-aware logic  (SRS §5 + §6)
+            # 12b. Log telemetry (before dispatch)
+            if probs is not None:
+                prob_str = " | ".join(
+                    f"Act{i}:{p * 100:.1f}%" for i, p in enumerate(probs)
+                )
+                max_prob = float(np.max(probs)) * 100
+                cv_str = f"{critic_value:+.3f}" if critic_value is not None else "N/A"
+                self.log.info(
+                    "🧠 TELEMETRY | Regime: %s | "
+                    "Critic Value: %s | Confidence: %.1f%% (%s)",
+                    regime.value,
+                    cv_str,
+                    max_prob,
+                    prob_str,
+                )
+
+            # 13. Dispatch with position-aware logic  (SRS §5 + §6)
             self._dispatch_action(actual_action, regime, ohlcv, equity)
 
-            # 13. Log  (SRS §7)
+            # 14. Log  (SRS §7)
             unrealised = acct.get("profit", 0.0)
             self.log.info(
                 "Bar #%d | Regime: %s | Action: %d → %s | "
