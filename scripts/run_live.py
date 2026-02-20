@@ -368,7 +368,7 @@ class LiveEngine:
             action_idx, _ = agent_data["model"].predict(
                 obs_ready, deterministic=True
             )
-            raw_action = int(action_idx)
+            raw_action = int(action_idx.item())
 
             # 9. Map to actual action
             allowed = AGENT_ACTION_MAP[regime]
