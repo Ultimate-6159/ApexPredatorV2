@@ -214,12 +214,23 @@ python -m scripts.analyze_live_logs --csv trades.csv    # export to CSV
 | Section | Metrics |
 |---|---|
 | **Account** | Starting/Ending Balance, Net P&L, Return % |
-| **Overall Trade Metrics** | Win Rate, Profit Factor, Expectancy, Max Drawdown |
+| **Overall Trade Metrics** | Win Rate, Profit Factor, Expectancy, Avg Win/Loss, Max Drawdown |
+| **Institutional Risk Metrics** | Sharpe Ratio, Sortino Ratio, Calmar Ratio, Payoff Ratio, Gross P/L |
 | **Win Rate by Agent** | Per-regime: Trades, Wins, WR%, PF, Net P&L, Avg P&L |
 | **Close Reason Breakdown** | TP/SL_HIT, TRAILING_STOP, VOLUNTARY_CLOSE, REGIME_SHIFT, TIME_STOP, … |
 | **Action Distribution** | HOLD / BUY / SELL counts with bar chart |
 | **Regime Distribution** | Bars per regime with bar chart |
 | **Recent Trades** | Last 10 trades: ticket, direction, regime, lot, entry, close, PnL, reason |
+
+**Institutional Metric Thresholds:**
+
+| Metric | Poor | OK | Good | Elite |
+|---|---|---|---|---|
+| Profit Factor | < 1.0 | 1.0–1.4 | 1.5–2.0 | > 2.0 |
+| Sharpe Ratio | < 0.5 | 0.5–1.0 | 1.0–2.0 | > 2.0 |
+| Sortino Ratio | < 1.0 | 1.0–1.5 | 1.5–3.0 | > 3.0 |
+| Calmar Ratio | < 0.5 | 0.5–1.0 | 1.0–3.0 | > 3.0 |
+| Payoff Ratio | < 1.0 | 1.0–1.5 | 1.5–2.5 | > 2.5 |
 
 ---
 

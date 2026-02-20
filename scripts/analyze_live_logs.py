@@ -7,6 +7,8 @@ ExecutionEngine / RiskManager loggers, then computes:
   • Win Rate (overall + per-regime agent)
   • Profit Factor  (gross profit / gross loss)
   • Max Drawdown   (peak-to-trough on running balance)
+  • Sharpe Ratio / Sortino Ratio / Calmar Ratio  (institutional risk metrics)
+  • Expectancy & Payoff Ratio
   • Trade breakdown (TP/SL hit, voluntary close, regime shift, time stop, …)
   • Regime distribution & per-regime P&L
 
@@ -21,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import re
 import sys
 from collections import defaultdict
@@ -346,6 +349,86 @@ def _avg_win_loss(trades: Sequence[Trade]) -> tuple[float, float]:
     return avg_w, avg_l
 
 
+def _payoff_ratio(avg_win: float, avg_loss: float) -> float:
+    """Avg Win / |Avg Loss|.  Higher = better risk/reward per trade."""
+    if avg_loss == 0:
+        return float("inf") if avg_win > 0 else 0.0
+    return avg_win / abs(avg_loss)
+
+
+def _sharpe_ratio(
+    trades: Sequence[Trade],
+    risk_free_annual: float = 0.0,
+    periods_per_year: float = 252.0,
+) -> float:
+    """Annualized Sharpe Ratio from per-trade PnL returns.
+
+    ``SR = (mean_return - Rf_per_trade) / std_return * sqrt(N_per_year)``
+
+    Uses trade count as proxy for periods.  Returns 0.0 when data is
+    insufficient (< 2 trades) or zero variance.
+    """
+    if len(trades) < 2:
+        return 0.0
+    returns = [t.pnl for t in trades]
+    n = len(returns)
+    mean_r = sum(returns) / n
+    var = sum((r - mean_r) ** 2 for r in returns) / (n - 1)
+    std_r = math.sqrt(var) if var > 0 else 0.0
+    if std_r == 0:
+        return 0.0
+    rf_per_trade = risk_free_annual / periods_per_year
+    return ((mean_r - rf_per_trade) / std_r) * math.sqrt(periods_per_year)
+
+
+def _sortino_ratio(
+    trades: Sequence[Trade],
+    risk_free_annual: float = 0.0,
+    periods_per_year: float = 252.0,
+) -> float:
+    """Annualized Sortino Ratio — penalizes downside deviation only.
+
+    ``Sortino = (mean_return - Rf) / downside_std * sqrt(N)``
+    """
+    if len(trades) < 2:
+        return 0.0
+    returns = [t.pnl for t in trades]
+    n = len(returns)
+    mean_r = sum(returns) / n
+    downside = [r for r in returns if r < 0]
+    if not downside:
+        return float("inf") if mean_r > 0 else 0.0
+    down_var = sum(r ** 2 for r in downside) / len(downside)
+    down_std = math.sqrt(down_var) if down_var > 0 else 0.0
+    if down_std == 0:
+        return 0.0
+    rf_per_trade = risk_free_annual / periods_per_year
+    return ((mean_r - rf_per_trade) / down_std) * math.sqrt(periods_per_year)
+
+
+def _calmar_ratio(
+    balance_series: Sequence[tuple[datetime, float]],
+) -> float:
+    """Calmar Ratio = Annualized Return % / Max Drawdown %.
+
+    Uses first/last balance + elapsed time to annualize.
+    Returns 0.0 if period < 1 day or MDD = 0.
+    """
+    if len(balance_series) < 2:
+        return 0.0
+    first_ts, first_bal = balance_series[0]
+    last_ts, last_bal = balance_series[-1]
+    elapsed_days = (last_ts - first_ts).total_seconds() / 86400
+    if elapsed_days < 1 or first_bal <= 0:
+        return 0.0
+    total_return = (last_bal - first_bal) / first_bal
+    annual_return = total_return * (365.0 / elapsed_days)
+    _, mdd_pct = _max_drawdown(balance_series)
+    if mdd_pct == 0:
+        return float("inf") if annual_return > 0 else 0.0
+    return (annual_return * 100) / mdd_pct
+
+
 # ══════════════════════════════════════════════
 # Display
 # ══════════════════════════════════════════════
@@ -407,6 +490,42 @@ def display_dashboard(data: DashboardData) -> None:
     _kv("Avg Win", f"${avg_w:+,.2f}")
     _kv("Avg Loss", f"${avg_l:+,.2f}")
     _kv("Max Drawdown", f"${dd_amt:,.2f}  ({dd_pct:.2f}%)")
+
+    # ── Institutional Risk Metrics ──
+    _section("INSTITUTIONAL RISK METRICS")
+
+    gross_profit = sum(t.pnl for t in trades if t.pnl > 0)
+    gross_loss = abs(sum(t.pnl for t in trades if t.pnl < 0))
+    pr = _payoff_ratio(avg_w, avg_l)
+    sharpe = _sharpe_ratio(trades)
+    sortino = _sortino_ratio(trades)
+    calmar = _calmar_ratio(data.balance_series)
+
+    _kv("Gross Profit", f"${gross_profit:,.2f}")
+    _kv("Gross Loss", f"${gross_loss:,.2f}")
+    _kv("Profit Factor",
+        f"{pf:.2f}" if pf != float("inf") else "∞  (no losses)")
+    _kv("Payoff Ratio (Win/Loss)",
+        f"{pr:.2f}" if pr != float("inf") else "∞  (no losses)")
+    _kv("Expectancy (per trade)", f"${exp:+,.2f}")
+    _kv("Sharpe Ratio (ann.)",
+        f"{sharpe:+.2f}" if trades else "N/A")
+    _kv("Sortino Ratio (ann.)",
+        f"{sortino:+.2f}" if sortino != float("inf") else "∞  (no downside)"
+        if trades else "N/A")
+    _kv("Calmar Ratio (ann.)",
+        f"{calmar:.2f}" if calmar != float("inf") else "∞  (no drawdown)"
+        if data.balance_series else "N/A")
+
+    print()
+    _kv("Interpretation Guide", "")
+    print(f"      {'Metric':<22} {'Poor':>8} {'OK':>8} {'Good':>8} {'Elite':>8}")
+    print(f"      {'─' * 54}")
+    print(f"      {'Profit Factor':<22} {'< 1.0':>8} {'1.0-1.4':>8} {'1.5-2.0':>8} {'> 2.0':>8}")
+    print(f"      {'Sharpe Ratio':<22} {'< 0.5':>8} {'0.5-1.0':>8} {'1.0-2.0':>8} {'> 2.0':>8}")
+    print(f"      {'Sortino Ratio':<22} {'< 1.0':>8} {'1.0-1.5':>8} {'1.5-3.0':>8} {'> 3.0':>8}")
+    print(f"      {'Calmar Ratio':<22} {'< 0.5':>8} {'0.5-1.0':>8} {'1.0-3.0':>8} {'> 3.0':>8}")
+    print(f"      {'Payoff Ratio':<22} {'< 1.0':>8} {'1.0-1.5':>8} {'1.5-2.5':>8} {'> 2.5':>8}")
 
     # ── Win Rate by Agent (Regime) ──
     _section("WIN RATE BY AGENT")
