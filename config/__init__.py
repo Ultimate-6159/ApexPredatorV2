@@ -88,9 +88,15 @@ ATR_TP_MULTIPLIER: dict[Regime, float] = {
     Regime.HIGH_VOLATILITY: 2.0,
 }
 
-# Trailing Stop (Points-based — overrides AI when profit retraces)
-TRAILING_ACTIVATION_POINTS: int = 300   # Activate after 300 points profit
-TRAILING_DRAWDOWN_POINTS: int = 200     # Force close if retraces 200 points from peak
+# Trailing Stop (ATR-based — adapts to volatility)
+TRAILING_ACTIVATION_ATR: float = 1.0    # Activate after 1.0 × ATR profit
+TRAILING_DRAWDOWN_ATR: float = 0.5      # Force close if retraces 0.5 × ATR from peak
+
+# News Filter (Forex Factory calendar — forces HIGH_VOLATILITY before red news)
+NEWS_FILTER_ENABLED: bool = True
+NEWS_BLACKOUT_MINUTES: int = 15          # Minutes before event to activate
+NEWS_CURRENCIES: list[str] = ["USD"]     # Currencies to watch
+NEWS_CACHE_HOURS: int = 4                # Re-fetch calendar interval
 
 # ──────────────────────────────────────────────
 # Training

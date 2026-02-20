@@ -43,7 +43,7 @@ _LINE_RE = re.compile(rf"^{_TS_RE} \| (\w+) \| (.+)$")
 # Message-level patterns
 _BAR_RE = re.compile(
     r"Bar #(\d+) \| Regime: (\S+) \| Action: (\d+) .+ (\S+) \| "
-    r"PnL: (-?[\d.]+) \| (?:Equity: (-?[\d.]+) \| )?Balance: (-?[\d.]+)"
+    r"PnL: (-?[\d.]+) \| Balance: (-?[\d.]+)"
 )
 
 _OPEN_RE = re.compile(
@@ -188,7 +188,7 @@ def parse_logs(log_files: Sequence[Path]) -> DashboardData:
                     data.bar_count = max(data.bar_count, int(m.group(1)))
                     regime = m.group(2)
                     action_name = m.group(4)
-                    balance = float(m.group(7))
+                    balance = float(m.group(6))
 
                     data.regime_bars[regime] += 1
                     data.action_counts[action_name] += 1

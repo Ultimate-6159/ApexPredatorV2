@@ -14,6 +14,10 @@ SRS Requirements Implemented:
   6. Risk Management — Max 1 position, ATR SL/TP, slippage protection
   7. Logging & Fail-Safes — MT5 auto-reconnect, daily rotating log
 
+V3 Upgrades:
+  8. ATR-Based Dynamic Trailing Stop — adapts to volatility (narrow in ranging, wide in trending)
+  9. News Filter — Forex Factory calendar, forces HIGH_VOLATILITY before red events
+
 Usage:
     python -m scripts.run_live [--timeframe M5] [--symbol XAUUSDm]
 """
@@ -44,15 +48,20 @@ from config import (
     ATR_PERIOD,
     MAGIC_NUMBER,
     MODEL_DIR,
+    NEWS_BLACKOUT_MINUTES,
+    NEWS_CACHE_HOURS,
+    NEWS_CURRENCIES,
+    NEWS_FILTER_ENABLED,
     SYMBOL,
     TIMEFRAME_NAME,
-    TRAILING_ACTIVATION_POINTS,
-    TRAILING_DRAWDOWN_POINTS,
+    TRAILING_ACTIVATION_ATR,
+    TRAILING_DRAWDOWN_ATR,
     TRAINING_LOG_DIR,
     Regime,
 )
 from core.execution_engine import ExecutionEngine
 from core.meta_router import MetaRouter
+from core.news_filter import NewsFilter
 from core.perception_engine import PerceptionEngine
 from core.risk_manager import RiskManager
 
@@ -211,10 +220,20 @@ class LiveEngine:
         self._prev_regime: Regime | None = None
         self._bar_count: int = 0
         self._last_bar_time: int = 0
+        self._current_atr: float = 0.0
 
-        # Trailing stop state
+        # Trailing stop state (ATR-based dynamic)
         self._trailing_ticket: int | None = None
         self._highest_profit_points: float = 0.0
+
+        # News filter
+        self.news_filter: NewsFilter | None = None
+        if NEWS_FILTER_ENABLED:
+            self.news_filter = NewsFilter(
+                currencies=NEWS_CURRENCIES,
+                blackout_minutes=NEWS_BLACKOUT_MINUTES,
+                cache_hours=NEWS_CACHE_HOURS,
+            )
 
     # ── Public Entry Point ────────────────────
     def start(self) -> None:
@@ -336,21 +355,36 @@ class LiveEngine:
             # 1. Sync position state with broker (detect TP/SL hits)
             self._sync_position_state()
 
-            # 2. Trailing stop check (overrides AI)
-            self._check_trailing_stop()
-
-            # 3. Fetch fresh OHLCV + features
+            # 2. Fetch fresh OHLCV + features (needed for ATR)
             ohlcv = self.perception.fetch_ohlcv()
             features = self.perception.compute_features(ohlcv)
             latest_row = features.iloc[-1]
 
-            # 4. Detect regime  (SRS §3 — Perception)
+            # 3. Compute & store ATR (used by trailing stop + dispatch)
+            hl_range = (ohlcv["High"] - ohlcv["Low"]).rolling(ATR_PERIOD).mean()
+            self._current_atr = float(hl_range.iloc[-1]) if not hl_range.empty else 0.0
+
+            # 4. Trailing stop check (ATR-based, overrides AI)
+            self._check_trailing_stop()
+
+            # 5. Detect regime  (SRS §3 — Perception)
             regime = self.router.detect_regime(latest_row)
 
-            # 5. Regime-shift protocol  (SRS §4 — The Clean Slate)
+            # 5b. News filter — override regime before high-impact events
+            if self.news_filter is not None:
+                blackout, event_title = self.news_filter.is_blackout()
+                if blackout and regime != Regime.HIGH_VOLATILITY:
+                    self.log.warning(
+                        "NEWS OVERRIDE: %s → HIGH_VOLATILITY (event: %s)",
+                        regime.value,
+                        event_title,
+                    )
+                    regime = Regime.HIGH_VOLATILITY
+
+            # 6. Regime-shift protocol  (SRS §4 — The Clean Slate)
             self._handle_regime_shift(regime)
 
-            # 6. Risk checks
+            # 7. Risk checks
             acct = self.perception.get_account_info()
             balance = acct["balance"]
             equity = acct["equity"]
@@ -363,31 +397,31 @@ class LiveEngine:
                 self.log.warning("Circuit breaker active — skipping bar")
                 return
 
-            # 7. Time stop check  (SRS §6)
+            # 8. Time stop check  (SRS §6)
             self.risk.update_bar(self._bar_count)
             if self.risk.should_time_stop(self._bar_count):
                 self.executor.close_open_trade("TIME_STOP")
 
-            # 8. Normalize observation  (SRS §2)
+            # 9. Normalize observation  (SRS §2)
             raw_obs = latest_row.values.astype(np.float32)
             agent_data = self.agents[regime]
             obs_normalized = _normalize_obs(raw_obs, agent_data["stats"])
             obs_ready = obs_normalized.reshape(1, -1)
 
-            # 9. Predict action  (SRS §5)
+            # 10. Predict action  (SRS §5)
             action_idx, _ = agent_data["model"].predict(
                 obs_ready, deterministic=True
             )
             raw_action = int(action_idx.item())
 
-            # 10. Map to actual action
+            # 11. Map to actual action
             allowed = AGENT_ACTION_MAP[regime]
             actual_action = allowed[raw_action]
 
-            # 11. Dispatch with position-aware logic  (SRS §5 + §6)
+            # 12. Dispatch with position-aware logic  (SRS §5 + §6)
             self._dispatch_action(actual_action, regime, ohlcv, equity)
 
-            # 12. Log  (SRS §7)
+            # 13. Log  (SRS §7)
             unrealised = acct.get("profit", 0.0)
             self.log.info(
                 "Bar #%d | Regime: %s | Action: %d → %s | "
@@ -403,16 +437,20 @@ class LiveEngine:
         except Exception:
             self.log.exception("Error processing bar #%d", self._bar_count)
 
-    # ── Trailing Stop  (Points-Based) ─────────
+    # ── Trailing Stop  (ATR-Based Dynamic) ────
     def _check_trailing_stop(self) -> None:
-        """Monitor unrealized profit in points; force close on retrace.
+        """Monitor unrealized profit; force close on retrace.
 
-        Activates when profit exceeds TRAILING_ACTIVATION_POINTS.
-        Force closes if profit retraces TRAILING_DRAWDOWN_POINTS from peak.
+        Thresholds adapt to current volatility:
+          activation = TRAILING_ACTIVATION_ATR × ATR  (in points)
+          drawdown   = TRAILING_DRAWDOWN_ATR  × ATR  (in points)
         """
         if not self.risk.has_open_trade:
             self._trailing_ticket = None
             self._highest_profit_points = 0.0
+            return
+
+        if self._current_atr <= 0:
             return
 
         trade = self.risk.open_trade
@@ -429,6 +467,10 @@ class LiveEngine:
         sym = self.perception.get_symbol_info()
         point = sym["point"]
 
+        # Dynamic thresholds: ATR multiplier → points
+        activation_pts = (TRAILING_ACTIVATION_ATR * self._current_atr) / point
+        drawdown_pts_threshold = (TRAILING_DRAWDOWN_ATR * self._current_atr) / point
+
         # Profit in points (direction-aware, uses close-side price)
         if trade.direction == "BUY":
             profit_pts = (tick.bid - trade.entry_price) / point
@@ -436,13 +478,15 @@ class LiveEngine:
             profit_pts = (trade.entry_price - tick.ask) / point
 
         # 1. Activation
-        if profit_pts >= TRAILING_ACTIVATION_POINTS:
+        if profit_pts >= activation_pts:
             if self._trailing_ticket != trade.ticket:
                 self.log.info(
-                    "TRAILING ACTIVATED #%d — profit %.0f pts (threshold %d)",
+                    "TRAILING ACTIVATED #%d — profit %.0f pts "
+                    "(ATR=%.2f, threshold=%.0f pts)",
                     trade.ticket,
                     profit_pts,
-                    TRAILING_ACTIVATION_POINTS,
+                    self._current_atr,
+                    activation_pts,
                 )
                 self._trailing_ticket = trade.ticket
                 self._highest_profit_points = profit_pts
@@ -453,13 +497,15 @@ class LiveEngine:
                 self._highest_profit_points = profit_pts
 
             drawdown_pts = self._highest_profit_points - profit_pts
-            if drawdown_pts >= TRAILING_DRAWDOWN_POINTS:
+            if drawdown_pts >= drawdown_pts_threshold:
                 self.log.warning(
-                    "TRAILING STOP HIT #%d — peak=%.0f, now=%.0f, dd=%.0f pts",
+                    "TRAILING STOP HIT #%d — peak=%.0f, now=%.0f, "
+                    "dd=%.0f pts (threshold=%.0f)",
                     trade.ticket,
                     self._highest_profit_points,
                     profit_pts,
                     drawdown_pts,
+                    drawdown_pts_threshold,
                 )
                 self.executor.close_open_trade("TRAILING_STOP")
                 self._trailing_ticket = None
@@ -538,10 +584,6 @@ class LiveEngine:
 
         sym = self.perception.get_symbol_info()
 
-        # Current ATR for dynamic SL/TP  (SRS §6)
-        hl_range = (ohlcv["High"] - ohlcv["Low"]).rolling(ATR_PERIOD).mean()
-        atr = float(hl_range.iloc[-1]) if not hl_range.empty else 0.0
-
         # Find the raw_action index for ExecutionEngine
         raw_action_idx = AGENT_ACTION_MAP[regime].index(action)
 
@@ -550,7 +592,7 @@ class LiveEngine:
             regime=regime,
             price_bid=tick.bid,
             price_ask=tick.ask,
-            atr=atr,
+            atr=self._current_atr,
             point=sym["point"],
             equity=equity,
             tick_value=sym["trade_tick_value"],
