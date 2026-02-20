@@ -166,6 +166,11 @@ class PerceptionEngine:
         feat["ema_cross"] = np.where(ema50 > ema200, 1.0, -1.0)
 
         feat.dropna(inplace=True)
+
+        # Sanitize: replace infinities and clip extreme raw values
+        feat.replace([np.inf, -np.inf], np.nan, inplace=True)
+        feat.fillna(0.0, inplace=True)
+
         return feat
 
     # ── Convenience ───────────────────────────────

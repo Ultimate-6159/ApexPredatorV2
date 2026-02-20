@@ -80,6 +80,10 @@ _ANOMALY_RE = re.compile(
     r"ANOMALY DETECTED: Extreme feature value \(([\d.]+) STD\)"
 )
 
+_CONFIDENCE_GATE_RE = re.compile(
+    r"CONFIDENCE GATE: ([\d.]+)% < ([\d.]+)% threshold"
+)
+
 
 # ══════════════════════════════════════════════
 # Data Structures
@@ -114,6 +118,7 @@ class DashboardData:
     confidences: list[float] = field(default_factory=list)
     critic_values: list[float] = field(default_factory=list)
     anomaly_count: int = 0
+    confidence_gate_count: int = 0
     regime_confidences: dict[str, list[float]] = field(
         default_factory=lambda: defaultdict(list)
     )
@@ -331,6 +336,11 @@ def parse_logs(log_files: Sequence[Path]) -> DashboardData:
                 # ── Anomaly detection ──
                 if _ANOMALY_RE.search(msg):
                     data.anomaly_count += 1
+                    continue
+
+                # ── Confidence gate override ──
+                if _CONFIDENCE_GATE_RE.search(msg):
+                    data.confidence_gate_count += 1
                     continue
 
     return data
@@ -657,6 +667,7 @@ def display_dashboard(data: DashboardData) -> None:
             _kv("Min / Max Critic Value", f"{min_cv:+.3f} / {max_cv:+.3f}")
 
         _kv("Anomalies Detected", f"{data.anomaly_count}")
+        _kv("Confidence Gate Overrides", f"{data.confidence_gate_count}")
 
         # Per-regime average confidence
         if data.regime_confidences:

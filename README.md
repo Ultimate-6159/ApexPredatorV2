@@ -185,10 +185,12 @@ The `LiveEngine` fires once per bar close and executes a 14-step pipeline:
  8.  Time stop check
  9.  Z-Score normalize observation
  9b. Anomaly detection (warn if any feature > 5.0 STD)
+ 9c. Hard clip features to ±10.0 (prevent hallucinations)
 10.  Inference Telemetry — extract action probs + critic value
 11.  Predict action (PPO model, deterministic)
 12.  Map to actual action (regime-specific action space)
 12b. Log telemetry (confidence %, critic value, per-action probs)
+12c. Confidence gate — force HOLD if confidence < 75%
 13.  Dispatch with position-aware logic (Anti-Martingale)
 14.  Log bar result
 ```
@@ -421,6 +423,13 @@ python -m scripts.analyze_live_logs --csv trades.csv
 | `ATR_TP_MULTIPLIER` | 1.5–3.0 | Per-regime TP multiplier |
 | `TRAILING_ACTIVATION_ATR` | `1.0` | Trailing activates at 1.0 × ATR profit |
 | `TRAILING_DRAWDOWN_ATR` | `0.5` | Trailing closes on 0.5 × ATR retrace |
+
+### Inference Safety Guards
+
+| Parameter | Default | Description |
+|---|---|---|
+| `OBS_CLIP_RANGE` | `10.0` | Hard clip Z-Score features to ± this value |
+| `CONFIDENCE_GATE_PCT` | `75.0` | Force HOLD if AI confidence < this % |
 
 ### News Filter
 

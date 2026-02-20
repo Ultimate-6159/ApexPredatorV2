@@ -92,6 +92,10 @@ ATR_TP_MULTIPLIER: dict[Regime, float] = {
 TRAILING_ACTIVATION_ATR: float = 1.0    # Activate after 1.0 × ATR profit
 TRAILING_DRAWDOWN_ATR: float = 0.5      # Force close if retraces 0.5 × ATR from peak
 
+# Inference Safety Guards
+OBS_CLIP_RANGE: float = 10.0             # Hard clip Z-Score features to ± this value
+CONFIDENCE_GATE_PCT: float = 75.0        # Force HOLD if AI confidence < this %
+
 # News Filter (Forex Factory calendar — forces HIGH_VOLATILITY before red news)
 NEWS_FILTER_ENABLED: bool = True
 NEWS_BLACKOUT_MINUTES: int = 15          # Minutes before event to activate

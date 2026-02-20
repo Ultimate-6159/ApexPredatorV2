@@ -48,12 +48,14 @@ from config import (
     ACTION_SELL,
     AGENT_ACTION_MAP,
     ATR_PERIOD,
+    CONFIDENCE_GATE_PCT,
     MAGIC_NUMBER,
     MODEL_DIR,
     NEWS_BLACKOUT_MINUTES,
     NEWS_CACHE_HOURS,
     NEWS_CURRENCIES,
     NEWS_FILTER_ENABLED,
+    OBS_CLIP_RANGE,
     SYMBOL,
     TIMEFRAME_NAME,
     TRAILING_ACTIVATION_ATR,
@@ -419,6 +421,9 @@ class LiveEngine:
                     max_feature_val,
                 )
 
+            # 9c. Hard clip — prevent billion-STD hallucinations
+            obs_ready = np.clip(obs_ready, -OBS_CLIP_RANGE, OBS_CLIP_RANGE)
+
             # 10. Inference Telemetry — extract probabilities + critic value
             agent_model: PPO = agent_data["model"]
             probs: np.ndarray | None = None
@@ -445,6 +450,18 @@ class LiveEngine:
             # 12. Map to actual action
             allowed = AGENT_ACTION_MAP[regime]
             actual_action = allowed[raw_action]
+
+            # 12c. Confidence gate — force HOLD if AI is uncertain
+            if actual_action != ACTION_HOLD and probs is not None:
+                action_conf = float(probs[raw_action]) * 100
+                if action_conf < CONFIDENCE_GATE_PCT:
+                    self.log.warning(
+                        "🛡️ CONFIDENCE GATE: %.1f%% < %.0f%% threshold "
+                        "— forcing HOLD",
+                        action_conf,
+                        CONFIDENCE_GATE_PCT,
+                    )
+                    actual_action = ACTION_HOLD
 
             # 12b. Log telemetry (before dispatch)
             if probs is not None:
