@@ -23,7 +23,7 @@ from config import (
 )
 from core.risk_manager import OpenTrade, RiskManager
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("apex_live")
 
 
 class ExecutionEngine:

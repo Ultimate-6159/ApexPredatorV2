@@ -31,7 +31,7 @@ from config import (
 )
 
 load_dotenv()
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("apex_live")
 
 # Map readable timeframe name → MT5 constant
 _TF_MAP: dict[str, int] = {

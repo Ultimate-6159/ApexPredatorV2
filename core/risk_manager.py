@@ -25,7 +25,7 @@ from config import (
     Regime,
 )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("apex_live")
 
 
 @dataclass
