@@ -116,14 +116,14 @@ Each agent is a PPO model trained in a custom Gymnasium environment with regime-
 | Feature | Parameter | Description |
 |---|---|---|
 | **Position Sizing** | `tick_value * point / tick_size` | Calculates lot from equity (compound growth) |
-| **Risk Per Trade** | `0.5%` | Fixed percentage of equity at risk |
+| **Risk Per Trade** | `15%` | Aggressive sizing (overclock for 1.5×ATR SL, targets 0.10–0.15 lot) |
 | **ATR SL** | `1.5 × ATR` | Dynamic stop-loss adapts to volatility |
 | **ATR TP** | `1.5–3.0 × ATR` | Per-regime take-profit multiplier |
 | **ATR Trailing Stop** | `1.0 × ATR` / `0.5 × ATR` | Activation / drawdown thresholds *(V3)* |
 | **Time Stop** | 5–20 bars | Force-close after N bars (per regime) |
 | **Regime-Shift Exit** | Immediate | Close all on regime change |
 | **Circuit Breaker** | 5 losses → 30 min | Halt trading after consecutive losses |
-| **Max Drawdown** | `15%` | Full stop — no more trades |
+| **Max Drawdown** | `60%` | Full stop — no more trades |
 | **Anti-Martingale** | Max 1 position | Never adds to a losing position |
 | **Slippage Protection** | 30 points | `ORDER_FILLING_IOC` + deviation cap |
 
@@ -408,8 +408,8 @@ python -m scripts.analyze_live_logs --csv trades.csv
 
 | Parameter | Default | Description |
 |---|---|---|
-| `RISK_PER_TRADE_PCT` | `0.5` | % of equity at risk per trade |
-| `MAX_DRAWDOWN_PCT` | `15.0` | Hard stop — halts all trading |
+| `RISK_PER_TRADE_PCT` | `15.0` | % of equity at risk per trade (overclock for wide SL) |
+| `MAX_DRAWDOWN_PCT` | `60.0` | Hard stop — halts all trading |
 | `CONSECUTIVE_LOSS_LIMIT` | `5` | Losses before circuit breaker |
 | `HALT_MINUTES` | `30` | Circuit breaker cool-off |
 | `MAX_HOLDING_BARS` | 5–20 | Per-regime time stop (bars) |

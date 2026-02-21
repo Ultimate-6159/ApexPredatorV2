@@ -57,8 +57,8 @@ AGENT_ACTION_MAP: dict[Regime, list[int]] = {
 # ──────────────────────────────────────────────
 # Risk Management
 # ──────────────────────────────────────────────
-RISK_PER_TRADE_PCT: float = 0.5   # 0.5 % of balance
-MAX_DRAWDOWN_PCT: float = 15.0    # 15 % hard stop
+RISK_PER_TRADE_PCT: float = 15.0  # 15 % of equity (overclock to maintain 0.10-0.15 lot with 1.5 ATR SL)
+MAX_DRAWDOWN_PCT: float = 60.0    # 60 % hard stop (accommodates 15% risk per trade)
 CONSECUTIVE_LOSS_LIMIT: int = 5
 HALT_MINUTES: int = 30            # Cool-off after consecutive losses
 
