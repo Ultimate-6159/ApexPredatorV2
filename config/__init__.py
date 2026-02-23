@@ -48,8 +48,8 @@ ACTION_BUY: int = 1
 ACTION_SELL: int = 2
 
 AGENT_ACTION_MAP: dict[Regime, list[int]] = {
-    Regime.TRENDING_UP:      [ACTION_HOLD, ACTION_BUY,  ACTION_SELL],  # Bull Rider  (model idx1=BUY)
-    Regime.TRENDING_DOWN:    [ACTION_HOLD, ACTION_BUY,  ACTION_SELL],  # Bear Hunter (unlocked)
+    Regime.TRENDING_UP:      [ACTION_HOLD, ACTION_BUY],                # Bull Rider  (idx1=BUY only)
+    Regime.TRENDING_DOWN:    [ACTION_HOLD, ACTION_SELL],               # Bear Hunter (idx1=SELL only)
     Regime.MEAN_REVERTING:   [ACTION_HOLD, ACTION_BUY,  ACTION_SELL],  # Range Sniper
     Regime.HIGH_VOLATILITY:  [ACTION_HOLD, ACTION_BUY,  ACTION_SELL],  # Vol Assassin
 }

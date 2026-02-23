@@ -42,8 +42,8 @@ Apex Predator V2 solves **Catastrophic Forgetting** — the #1 failure mode of s
 │  └── News Filter override → forces HIGH_VOLATILITY before red events    │
 ├──────────────────────────────────────────────────────────────────────────┤
 │  Layer 3: Specialized RL Agents        (core/agents/)                   │
-│  ├── 🐂 Bull Rider    (TRENDING_UP)      → [HOLD, BUY, SELL]            │
-│  ├── 🐻 Bear Hunter   (TRENDING_DOWN)    → [HOLD, BUY, SELL]            │
+│  ├── 🐂 Bull Rider    (TRENDING_UP)      → [HOLD, BUY]                 │
+│  ├── 🐻 Bear Hunter   (TRENDING_DOWN)    → [HOLD, SELL]                │
 │  ├── 🎯 Range Sniper  (MEAN_REVERTING)   → [HOLD, BUY, SELL]            │
 │  └── ⚡ Vol Assassin  (HIGH_VOLATILITY)  → [HOLD, BUY, SELL]            │
 ├──────────────────────────────────────────────────────────────────────────┤
@@ -109,8 +109,8 @@ Each agent is a PPO model trained in a custom Gymnasium environment with regime-
 
 | Agent | Regime | Action Space | Strategy |
 |---|---|---|---|
-| 🐂 **Bull Rider** | `TRENDING_UP` | `[HOLD, BUY, SELL]` | Let profits run in uptrends |
-| 🐻 **Bear Hunter** | `TRENDING_DOWN` | `[HOLD, BUY, SELL]` | Momentum shorting |
+| 🐂 **Bull Rider** | `TRENDING_UP` | `[HOLD, BUY]` | Let profits run in uptrends |
+| 🐻 **Bear Hunter** | `TRENDING_DOWN` | `[HOLD, SELL]` | Momentum shorting |
 | 🎯 **Range Sniper** | `MEAN_REVERTING` | `[HOLD, BUY, SELL]` | Mean reversion, quick exits |
 | ⚡ **Vol Assassin** | `HIGH_VOLATILITY` | `[HOLD, BUY, SELL]` | Breakout/squeeze trading |
 
