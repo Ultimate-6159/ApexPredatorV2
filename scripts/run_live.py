@@ -427,18 +427,19 @@ class LiveEngine:
             obs_normalized = _normalize_obs(raw_obs, agent_data["stats"])
             obs_ready = obs_normalized.reshape(1, -1)
 
-            # 9b. Hard clip — sanitize extreme Z-Score values
+            # 9b. Sanitize NaN/Inf THEN hard clip (3-layer defense)
+            obs_ready = np.nan_to_num(
+                obs_ready, nan=0.0,
+                posinf=OBS_CLIP_RANGE, neginf=-OBS_CLIP_RANGE,
+            )
             obs_ready = np.clip(obs_ready, -OBS_CLIP_RANGE, OBS_CLIP_RANGE)
 
-            # 9c. Post-clip verification — confirm data is within ±10.0
-            max_feature_val = float(np.max(np.abs(obs_ready)))
-            if max_feature_val > OBS_CLIP_RANGE:
+            # 9c. Post-clip safety net (should never trigger after nan_to_num + clip)
+            if np.any(np.isnan(obs_ready)) or np.any(np.isinf(obs_ready)):
                 self.log.warning(
-                    "⚠️ ANOMALY: Post-clip value %.2f exceeds ±%.1f "
-                    "— NaN/Inf leak detected!",
-                    max_feature_val,
-                    OBS_CLIP_RANGE,
+                    "⚠️ ANOMALY: NaN/Inf survived sanitization — forcing zeros"
                 )
+                obs_ready = np.nan_to_num(obs_ready, nan=0.0, posinf=0.0, neginf=0.0)
 
             # 10. Inference Telemetry — extract probabilities + critic value
             agent_model: PPO = agent_data["model"]
@@ -597,7 +598,7 @@ class LiveEngine:
                     )
                     self._partial_close_done = True
             else:
-                self.log.debug(
+                self.log.warning(
                     "Partial close skipped — lot too small "
                     "(total=%.2f, to_close=%.2f, min=%.2f)",
                     trade.lot,
@@ -783,8 +784,16 @@ class LiveEngine:
         our_open = False
         if positions:
             for pos in positions:
-                if pos.magic == MAGIC_NUMBER and pos.ticket == trade.ticket:
+                if pos.magic == MAGIC_NUMBER:
                     our_open = True
+                    # Sync ticket if it drifted (e.g. after partial close)
+                    if pos.ticket != trade.ticket:
+                        self.log.info(
+                            "Position ticket synced: %d \u2192 %d",
+                            trade.ticket,
+                            pos.ticket,
+                        )
+                        self.risk.update_ticket(pos.ticket)
                     break
 
         if not our_open:

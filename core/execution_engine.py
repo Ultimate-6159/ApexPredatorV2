@@ -118,11 +118,21 @@ class ExecutionEngine:
             logger.error("Order FAILED: %s", result)
             return False
 
+        # Sync actual position ticket + fill price from broker
+        actual_ticket = result.order
+        actual_price = result.price if result.price > 0 else entry_price
+        positions = mt5.positions_get(symbol=self.symbol)
+        if positions:
+            for pos in positions:
+                if pos.magic == MAGIC_NUMBER:
+                    actual_ticket = pos.ticket
+                    break
+
         trade = OpenTrade(
-            ticket=result.order,
+            ticket=actual_ticket,
             direction=direction,
             regime=regime,
-            entry_price=entry_price,
+            entry_price=actual_price,
             sl=sl,
             tp=tp,
             lot=lot,
@@ -130,7 +140,7 @@ class ExecutionEngine:
             open_time=datetime.utcnow(),
         )
         self.risk.register_open(trade)
-        logger.info("Order FILLED: ticket=%d  %s %.2f @ %.2f", trade.ticket, direction, lot, entry_price)
+        logger.info("Order FILLED: ticket=%d  %s %.2f @ %.2f", trade.ticket, direction, lot, actual_price)
         return True
 
     # ── Close open position ───────────────────────
@@ -139,16 +149,26 @@ class ExecutionEngine:
         if trade is None:
             return False
 
-        # Fetch live position for accurate volume & ticket
+        # Fetch live position for accurate volume & ticket (MAGIC-only match)
         actual_volume = trade.lot
         actual_ticket = trade.ticket
+        position_found = False
         positions = mt5.positions_get(symbol=self.symbol)
         if positions:
             for pos in positions:
-                if pos.magic == MAGIC_NUMBER and pos.ticket == trade.ticket:
+                if pos.magic == MAGIC_NUMBER:
                     actual_volume = pos.volume
                     actual_ticket = pos.ticket
+                    position_found = True
                     break
+
+        if not position_found:
+            logger.warning(
+                "Position #%d not found on broker — already closed. Syncing state.",
+                trade.ticket,
+            )
+            self.risk.register_close(0.0)
+            return True
 
         tick = mt5.symbol_info_tick(self.symbol)
         if tick is None:
@@ -210,17 +230,30 @@ class ExecutionEngine:
         if trade is None:
             return False
 
+        # Sync position ticket from broker (may differ after partial close)
+        actual_ticket = trade.ticket
+        positions = mt5.positions_get(symbol=self.symbol)
+        if positions:
+            for pos in positions:
+                if pos.magic == MAGIC_NUMBER:
+                    actual_ticket = pos.ticket
+                    break
+
         request = {
             "action": mt5.TRADE_ACTION_SLTP,
             "symbol": self.symbol,
-            "position": trade.ticket,
+            "position": actual_ticket,
             "sl": new_sl,
             "tp": trade.tp,
         }
 
         result = mt5.order_send(request)
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-            logger.error("Modify SL FAILED: %s", result)
+            logger.error(
+                "Modify SL FAILED (retcode=%s): %s",
+                result.retcode if result else "None",
+                result,
+            )
             return False
 
         self.risk.update_sl(new_sl)
@@ -232,6 +265,15 @@ class ExecutionEngine:
         trade = self.risk.open_trade
         if trade is None:
             return False
+
+        # Sync position ticket from broker
+        actual_ticket = trade.ticket
+        positions = mt5.positions_get(symbol=self.symbol)
+        if positions:
+            for pos in positions:
+                if pos.magic == MAGIC_NUMBER:
+                    actual_ticket = pos.ticket
+                    break
 
         tick = mt5.symbol_info_tick(self.symbol)
         if tick is None:
@@ -246,7 +288,7 @@ class ExecutionEngine:
             "symbol": self.symbol,
             "volume": volume_to_close,
             "type": close_type,
-            "position": trade.ticket,
+            "position": actual_ticket,
             "price": close_price,
             "deviation": SLIPPAGE_POINTS,
             "magic": MAGIC_NUMBER,
@@ -274,6 +316,21 @@ class ExecutionEngine:
 
         remaining = round(trade.lot - volume_to_close, 2)
         self.risk.update_lot(remaining)
+
+        # Sync ticket after partial close (may change on some brokers)
+        positions = mt5.positions_get(symbol=self.symbol)
+        if positions:
+            for pos in positions:
+                if pos.magic == MAGIC_NUMBER:
+                    if pos.ticket != actual_ticket:
+                        logger.info(
+                            "Position ticket updated: %d → %d (after partial close)",
+                            actual_ticket,
+                            pos.ticket,
+                        )
+                    self.risk.update_ticket(pos.ticket)
+                    break
+
         logger.info(
             "Partial close FILLED: ticket=%d  closed %.2f lots  remaining %.2f lots",
             trade.ticket,

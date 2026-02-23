@@ -180,6 +180,11 @@ class RiskManager:
         if self._open_trade is not None:
             self._open_trade.lot = new_lot
 
+    def update_ticket(self, new_ticket: int) -> None:
+        """Update tracked position ticket (may change after partial close)."""
+        if self._open_trade is not None:
+            self._open_trade.ticket = new_ticket
+
     # ── Drawdown Check ────────────────────────
     def check_drawdown(self, current_balance: float) -> bool:
         """Return True if max drawdown breached → full stop."""
