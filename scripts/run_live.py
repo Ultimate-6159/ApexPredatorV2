@@ -496,62 +496,72 @@ class LiveEngine:
                     prob_str,
                 )
 
-            # 12d. RSI Anti-Chasing Filter (Task 1)
-            #   Prevent buying at overbought / selling at oversold extremes
-            rsi_fast_val = float(latest_row.get("rsi_fast", 50.0))
-            if (
-                actual_action == ACTION_BUY
-                and regime == Regime.TRENDING_UP
-                and rsi_fast_val >= 75.0
-            ):
-                self.log.warning(
-                    "🚨 RSI FILTER: BUY blocked in TRENDING_UP "
-                    "(RSI=%.1f >= 75 — overbought)",
-                    rsi_fast_val,
-                )
-                actual_action = ACTION_HOLD
-            elif (
-                actual_action == ACTION_SELL
-                and regime == Regime.TRENDING_DOWN
-                and rsi_fast_val <= 25.0
-            ):
-                self.log.warning(
-                    "🚨 RSI FILTER: SELL blocked in TRENDING_DOWN "
-                    "(RSI=%.1f <= 25 — oversold)",
-                    rsi_fast_val,
-                )
-                actual_action = ACTION_HOLD
-
-            # 12e. Confirmed Pullback Filter (Task 2)
-            #   Only enter trend trades near EMA50 with price on the right side
+            # 12d. Momentum Ribbon Filter (EMA7 + EMA20)
+            #   High-frequency entry: trade near EMA7 with EMA7/EMA20 alignment
             if (
                 actual_action in (ACTION_BUY, ACTION_SELL)
                 and regime in (Regime.TRENDING_UP, Regime.TRENDING_DOWN)
                 and self._current_atr > 0
+                and len(ohlcv) >= 20
             ):
-                current_close = float(ohlcv["Close"].iloc[-1])
-                dist_ema50_pct = float(latest_row.get("dist_ema50", 0.0))
-                # Approximate absolute distance: dist% / 100 * close
-                abs_dist = abs(dist_ema50_pct / 100.0) * current_close
+                close_series = ohlcv["Close"]
+                current_close = float(close_series.iloc[-1])
+                current_ema7 = float(
+                    close_series.ewm(span=7, adjust=False).mean().iloc[-1]
+                )
+                current_ema20 = float(
+                    close_series.ewm(span=20, adjust=False).mean().iloc[-1]
+                )
+                dist_from_ema7 = abs(current_close - current_ema7)
+                rsi_fast_val = float(latest_row.get("rsi_fast", 50.0))
 
                 if actual_action == ACTION_BUY and regime == Regime.TRENDING_UP:
-                    if abs_dist > 1.0 * self._current_atr or dist_ema50_pct < 0:
+                    ribbon_ok = (
+                        current_ema7 > current_ema20
+                        and dist_from_ema7 <= 0.8 * self._current_atr
+                        and current_close > current_ema7
+                    )
+                    if rsi_fast_val >= 80.0:
                         self.log.info(
-                            "⏳ PULLBACK FILTER: BUY deferred "
-                            "(dist=%.2f, ATR=%.2f, close %s EMA50)",
-                            abs_dist,
-                            self._current_atr,
-                            "below" if dist_ema50_pct < 0 else "too far above",
+                            "🚨 RSI FILTER: BUY blocked (RSI=%.1f >= 80)",
+                            rsi_fast_val,
                         )
                         actual_action = ACTION_HOLD
-                elif actual_action == ACTION_SELL and regime == Regime.TRENDING_DOWN:
-                    if abs_dist > 1.0 * self._current_atr or dist_ema50_pct > 0:
+                    elif not ribbon_ok:
                         self.log.info(
-                            "⏳ PULLBACK FILTER: SELL deferred "
-                            "(dist=%.2f, ATR=%.2f, close %s EMA50)",
-                            abs_dist,
+                            "⏳ RIBBON: BUY deferred "
+                            "(EMA7=%.2f, EMA20=%.2f, close=%.2f, "
+                            "dist=%.2f, ATR=%.2f)",
+                            current_ema7,
+                            current_ema20,
+                            current_close,
+                            dist_from_ema7,
                             self._current_atr,
-                            "above" if dist_ema50_pct > 0 else "too far below",
+                        )
+                        actual_action = ACTION_HOLD
+
+                elif actual_action == ACTION_SELL and regime == Regime.TRENDING_DOWN:
+                    ribbon_ok = (
+                        current_ema7 < current_ema20
+                        and dist_from_ema7 <= 0.8 * self._current_atr
+                        and current_close < current_ema7
+                    )
+                    if rsi_fast_val <= 20.0:
+                        self.log.info(
+                            "🚨 RSI FILTER: SELL blocked (RSI=%.1f <= 20)",
+                            rsi_fast_val,
+                        )
+                        actual_action = ACTION_HOLD
+                    elif not ribbon_ok:
+                        self.log.info(
+                            "⏳ RIBBON: SELL deferred "
+                            "(EMA7=%.2f, EMA20=%.2f, close=%.2f, "
+                            "dist=%.2f, ATR=%.2f)",
+                            current_ema7,
+                            current_ema20,
+                            current_close,
+                            dist_from_ema7,
+                            self._current_atr,
                         )
                         actual_action = ACTION_HOLD
 

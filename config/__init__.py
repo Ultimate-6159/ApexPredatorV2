@@ -82,19 +82,19 @@ DEFAULT_SL_PIPS: float = 30.0
 DEFAULT_TP_PIPS: float = 60.0
 ATR_SL_MULTIPLIER: float = 1.5
 ATR_TP_MULTIPLIER: dict[Regime, float] = {
-    Regime.TRENDING_UP:     1.68,   # Ghost TP — avoids round-number stop hunts
-    Regime.TRENDING_DOWN:   1.68,
-    Regime.MEAN_REVERTING:  1.0,
-    Regime.HIGH_VOLATILITY: 1.5,
+    Regime.TRENDING_UP:     1.20,   # Hit & Run — fast TP for high-frequency re-entry
+    Regime.TRENDING_DOWN:   1.20,
+    Regime.MEAN_REVERTING:  0.80,   # Tight scalp in ranging markets
+    Regime.HIGH_VOLATILITY: 1.50,
 }
 
 # Trailing Stop (ATR-based — adapts to volatility)
-TRAILING_ACTIVATION_ATR: float = 0.8    # Activate after 0.8 × ATR profit (survive M5 noise)
-TRAILING_DRAWDOWN_ATR: float = 0.5      # Force close if retraces 0.5 × ATR from peak
+TRAILING_ACTIVATION_ATR: float = 0.8    # Activate after 0.8 × ATR profit
+TRAILING_DRAWDOWN_ATR: float = 0.4      # Force close if retraces 0.4 × ATR from peak
 
 # Profit Locking Strategy (Break-Even + Partial Close)
 ENABLE_BREAK_EVEN: bool = True
-BREAK_EVEN_ACTIVATION_ATR: float = 0.5  # Move SL to entry when profit >= 0.5 × ATR
+BREAK_EVEN_ACTIVATION_ATR: float = 0.4  # Move SL to entry when profit >= 0.4 × ATR (micro-lock)
 BREAK_EVEN_BUFFER_POINTS: int = 20      # Extra points above entry to cover commission/swap
 
 ENABLE_PARTIAL_CLOSE: bool = True
@@ -103,7 +103,7 @@ PARTIAL_CLOSE_VOLUME_PCT: float = 0.5      # Fraction of lot to close (0.5 = 50%
 
 # Inference Safety Guards
 OBS_CLIP_RANGE: float = 10.0             # Hard clip Z-Score features to ± this value
-CONFIDENCE_GATE_PCT: float = 75.0        # Force HOLD if AI confidence < this %
+CONFIDENCE_GATE_PCT: float = 70.0        # Force HOLD if AI confidence < this %
 
 # News Filter (Forex Factory calendar — forces HIGH_VOLATILITY before red news)
 NEWS_FILTER_ENABLED: bool = True
