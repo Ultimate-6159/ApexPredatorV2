@@ -1,6 +1,6 @@
 # 🦅 Apex Predator V2 — Mixture of Experts (MoE) Algorithmic Trading System
 
-> Institutional-grade XAUUSD trading on MetaTrader 5 powered by 4 regime-specific Reinforcement Learning agents, ATR-adaptive risk management, and a Forex Factory news filter.
+> Institutional-grade XAUUSD trading on MetaTrader 5 powered by 4 regime-specific Reinforcement Learning agents, 3-stage profit locking, ATR-adaptive risk management, and a Forex Factory news filter.
 
 ---
 
@@ -15,12 +15,14 @@ Apex Predator V2 solves **Catastrophic Forgetting** — the #1 failure mode of s
 | **Mixture of Experts** | 4 PPO agents, each mastering one market regime |
 | **13 Noise-Free Features** | RSI, BB, EMA, ADX, ATR, Volume Z-Score, etc. |
 | **ATR-Based Dynamic SL/TP** | Per-regime multipliers adapt to volatility |
-| **ATR-Based Trailing Stop** | Activation & drawdown thresholds scale with ATR *(V3)* |
-| **News Filter** | Forex Factory calendar forces HIGH_VOLATILITY before red events *(V3)* |
+| **3-Stage Profit Locking** | Break-Even (1.0×ATR) → Partial Close 50% (1.5×ATR) → Trailing Stop (2.0×ATR) |
+| **News Filter** | Forex Factory calendar forces HIGH_VOLATILITY before red events |
 | **Dynamic Position Sizing** | `tick_value`-based formula using equity (compound growth) |
+| **Dynamic Filling Mode** | Auto-detects broker-supported IOC/FOK/RETURN + retry on error 10013 |
 | **Regime-Shift Protocol** | Force-close all positions on regime change |
-| **Anti-Martingale** | Max 1 position, fixed 0.5% risk, circuit breaker |
-| **Live Performance Dashboard** | Parses live logs → Win Rate, Profit Factor, Max Drawdown |
+| **Anti-Martingale** | Max 1 position, 15% risk, circuit breaker |
+| **Inference Safety Guards** | Z-Score clip ±10.0, confidence gate 75%, anomaly detection |
+| **Live Performance Dashboard** | Parses live logs → Win Rate, Profit Factor, Sharpe, Sortino, Calmar |
 
 ---
 
@@ -28,30 +30,33 @@ Apex Predator V2 solves **Catastrophic Forgetting** — the #1 failure mode of s
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│                          APEX PREDATOR V2                                │
+│                       APEX PREDATOR V2 (V3)                              │
 ├──────────────────────────────────────────────────────────────────────────┤
 │  Layer 1: Perception Engine            (core/perception_engine.py)       │
 │  ├── MT5 Connection (OHLCV + Tick Volume, 300-bar lookback)              │
-│  └── 13 Noise-Free Features → Z-Score Normalized per agent              │
+│  ├── 13 Noise-Free Features (inf/NaN sanitized)                          │
+│  └── Z-Score Normalized per agent (min std=0.01, clip ±10.0)            │
 ├──────────────────────────────────────────────────────────────────────────┤
 │  Layer 2: Meta-Router                  (core/meta_router.py)            │
 │  ├── Deterministic regime detection (ADX / DI / Volatility Ratio)       │
 │  └── News Filter override → forces HIGH_VOLATILITY before red events    │
 ├──────────────────────────────────────────────────────────────────────────┤
 │  Layer 3: Specialized RL Agents        (core/agents/)                   │
-│  ├── 🐂 Bull Rider    (TRENDING_UP)      → [HOLD, BUY]                  │
-│  ├── 🐻 Bear Hunter   (TRENDING_DOWN)    → [HOLD, SELL]                 │
+│  ├── 🐂 Bull Rider    (TRENDING_UP)      → [HOLD, BUY, SELL]            │
+│  ├── 🐻 Bear Hunter   (TRENDING_DOWN)    → [HOLD, BUY, SELL]            │
 │  ├── 🎯 Range Sniper  (MEAN_REVERTING)   → [HOLD, BUY, SELL]            │
 │  └── ⚡ Vol Assassin  (HIGH_VOLATILITY)  → [HOLD, BUY, SELL]            │
 ├──────────────────────────────────────────────────────────────────────────┤
 │  Layer 4: Reality Shield & Execution                                     │
 │  ├── Risk Manager      (core/risk_manager.py)                           │
 │  │   ├── tick_value position sizing (equity-based compound growth)       │
-│  │   ├── ATR trailing stop (activation 1×ATR, drawdown 0.5×ATR)         │
+│  │   ├── 3-stage profit locking (Break-Even → Partial Close → Trailing) │
 │  │   ├── Time stop (5-20 bars per regime) + Circuit breaker              │
-│  │   └── Max drawdown 15% hard stop                                     │
+│  │   └── Max drawdown 60% hard stop                                     │
 │  └── Execution Engine  (core/execution_engine.py)                       │
-│      ├── MT5 orders with ATR SL/TP + slippage protection (30 pts)       │
+│      ├── Dynamic filling mode detection (IOC/FOK/RETURN)                │
+│      ├── Error 10013 auto-retry with alternative filling modes           │
+│      ├── Live position sync before close (accurate volume/ticket)        │
 │      └── Anti-Martingale: max 1 position at any time                    │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
@@ -64,21 +69,26 @@ Apex Predator V2 solves **Catastrophic Forgetting** — the #1 failure mode of s
 
 Fetches live OHLCV + tick volume from MT5 and computes 13 noise-free features:
 
-| Feature | Description |
-|---|---|
-| `rsi_fast` | RSI (7 periods) |
-| `rsi_slow` | RSI (14 periods) |
-| `bb_width` | Bollinger Band Width (normalized) |
-| `dist_ema50` | Distance to EMA 50 (%) |
-| `dist_ema200` | Distance to EMA 200 (%) |
-| `adx` | Average Directional Index |
-| `plus_di` | +DI (Directional Indicator) |
-| `minus_di` | −DI (Directional Indicator) |
-| `atr_norm` | ATR normalized by close price |
-| `volatility_ratio` | ATR / 50-bar rolling mean ATR |
-| `volume_zscore` | Volume Z-score (rolling 50 bars) |
-| `close_return` | Price return (%) |
-| `ema_cross` | EMA 50/200 crossover signal (+1/−1) |
+| # | Feature | Description |
+|---|---|---|
+| 1 | `rsi_fast` | RSI (7 periods) |
+| 2 | `rsi_slow` | RSI (14 periods) |
+| 3 | `bb_width` | Bollinger Band Width (normalized) |
+| 4 | `dist_ema50` | Distance to EMA 50 (%) |
+| 5 | `dist_ema200` | Distance to EMA 200 (%) |
+| 6 | `adx` | Average Directional Index (10) |
+| 7 | `plus_di` | +DI (Directional Indicator) |
+| 8 | `minus_di` | −DI (Directional Indicator) |
+| 9 | `atr_norm` | ATR(14) normalized by close price |
+| 10 | `volatility_ratio` | ATR / 50-bar rolling mean ATR |
+| 11 | `volume_zscore` | Volume Z-score (rolling 50 bars) |
+| 12 | `close_return` | Price return (%) |
+| 13 | `ema_cross` | EMA 50/200 crossover signal (+1/−1) |
+
+**Data Sanitization (3-layer defense):**
+1. `inf` / `-inf` → `NaN` → `0.0` (in `compute_features`)
+2. Z-Score: `std = max(std, 0.01)` prevents near-zero division explosion
+3. Hard clip `±10.0` before model inference (blocks billion-STD hallucinations)
 
 Also exposes `get_symbol_info()` returning `point`, `trade_tick_value`, `trade_tick_size`, `volume_min/max/step` for dynamic position sizing.
 
@@ -99,15 +109,30 @@ Each agent is a PPO model trained in a custom Gymnasium environment with regime-
 
 | Agent | Regime | Action Space | Strategy |
 |---|---|---|---|
-| 🐂 **Bull Rider** | `TRENDING_UP` | `[HOLD, BUY]` | Let profits run in uptrends |
-| 🐻 **Bear Hunter** | `TRENDING_DOWN` | `[HOLD, SELL]` | Momentum shorting |
+| 🐂 **Bull Rider** | `TRENDING_UP` | `[HOLD, BUY, SELL]` | Let profits run in uptrends |
+| 🐻 **Bear Hunter** | `TRENDING_DOWN` | `[HOLD, BUY, SELL]` | Momentum shorting |
 | 🎯 **Range Sniper** | `MEAN_REVERTING` | `[HOLD, BUY, SELL]` | Mean reversion, quick exits |
 | ⚡ **Vol Assassin** | `HIGH_VOLATILITY` | `[HOLD, BUY, SELL]` | Breakout/squeeze trading |
 
+**Inference Safety Guards:**
+- **Confidence Gate:** If AI probability < 75% → forced HOLD (prevents noisy trades)
+- **Post-Clip Verification:** After clipping to ±10.0, verify max ≤ 10.0 (detects NaN/Inf leaks)
+- **Telemetry Logging:** Per-bar action probabilities, critic value, and anomaly detection
+
 ### Layer 4 — Reality Shield
 
-- **Risk Manager** (`core/risk_manager.py`): Position sizing, time stops, circuit breaker, max drawdown
-- **Execution Engine** (`core/execution_engine.py`): MT5 order execution with ATR SL/TP, `ORDER_FILLING_IOC`, 30-point slippage deviation
+#### Risk Manager (`core/risk_manager.py`)
+- **Position Sizing:** `lot = risk_amount / (SL_points × value_per_point)` (tick_value-based)
+- **Time Stop:** Force-close after N bars per regime (MR=5, HV=10, TU/TD=20)
+- **Circuit Breaker:** 5 consecutive losses → 30-minute halt
+- **Max Drawdown:** 60% hard stop — kills all trading permanently
+- **Trade Lifecycle:** `register_open()` → `update_sl()` / `update_lot()` → `register_close()`
+
+#### Execution Engine (`core/execution_engine.py`)
+- **Dynamic Filling Mode:** `_get_filling_type()` queries `symbol_info().filling_mode` bitmask
+- **Error 10013 Retry:** If order fails → cycles through IOC/FOK/RETURN automatically
+- **Position Sync:** Before close → queries live MT5 position for real `volume` + `ticket`
+- **Operations:** `execute_action()`, `close_open_trade()`, `modify_sl()`, `partial_close()`
 
 ---
 
@@ -115,21 +140,56 @@ Each agent is a PPO model trained in a custom Gymnasium environment with regime-
 
 | Feature | Parameter | Description |
 |---|---|---|
-| **Position Sizing** | `tick_value * point / tick_size` | Calculates lot from equity (compound growth) |
-| **Risk Per Trade** | `15%` | Aggressive sizing (overclock for 1.5×ATR SL, targets 0.10–0.15 lot) |
+| **Position Sizing** | `tick_value × point / tick_size` | Calculates lot from equity (compound growth) |
+| **Risk Per Trade** | `15%` | Aggressive sizing (overclock for 1.5×ATR SL) |
 | **ATR SL** | `1.5 × ATR` | Dynamic stop-loss adapts to volatility |
-| **ATR TP** | `1.5–3.0 × ATR` | Per-regime take-profit multiplier |
-| **ATR Trailing Stop** | `1.0 × ATR` / `0.5 × ATR` | Activation / drawdown thresholds *(V3)* |
+| **ATR TP** | `1.0–2.0 × ATR` | Per-regime take-profit (MR=1.0, HV=1.5, TU/TD=2.0) |
+| **Break-Even** | `1.0 × ATR` | Move SL to entry + 20pts buffer |
+| **Partial Close** | `1.5 × ATR` | Close 50% of position to lock profit |
+| **Trailing Stop** | `2.0 × ATR` / `0.5 × ATR` | Activation / drawdown thresholds |
 | **Time Stop** | 5–20 bars | Force-close after N bars (per regime) |
-| **Regime-Shift Exit** | Immediate | Close all on regime change |
+| **Regime-Shift Exit** | Immediate | Close all on regime change (Clean Slate) |
 | **Circuit Breaker** | 5 losses → 30 min | Halt trading after consecutive losses |
 | **Max Drawdown** | `60%` | Full stop — no more trades |
 | **Anti-Martingale** | Max 1 position | Never adds to a losing position |
-| **Slippage Protection** | 30 points | `ORDER_FILLING_IOC` + deviation cap |
+| **Slippage Protection** | 30 points | Dynamic filling mode + deviation cap |
+| **Confidence Gate** | 75% | Force HOLD if AI is uncertain |
 
 ---
 
-## 📰 V3: News Filter (`core/news_filter.py`)
+## 🔒 3-Stage Profit Locking System
+
+The profit locking system protects unrealized profit in 3 progressive stages:
+
+```
+Entry ─────── 1.0×ATR ──────── 1.5×ATR ──────── 2.0×ATR ───────── TP
+              🛡️ Break-Even    💰 Partial Close   📈 Trailing Stop
+              SL → Entry+20pts  Close 50% lots    Lock peak, close
+                                                   on 0.5×ATR retrace
+```
+
+| Stage | Trigger | Action | Effect |
+|---|---|---|---|
+| 🛡️ **Break-Even** | Profit ≥ 1.0 × ATR | Move SL to entry + 20 points | Risk-free trade |
+| 💰 **Partial Close** | Profit ≥ 1.5 × ATR | Close 50% of position | Cash in pocket |
+| 📈 **Trailing Stop** | Profit ≥ 2.0 × ATR | Track peak, close on 0.5×ATR retrace | Let winners run |
+
+**Config:**
+
+| Parameter | Default | Description |
+|---|---|---|
+| `ENABLE_BREAK_EVEN` | `True` | Master switch for break-even |
+| `BREAK_EVEN_ACTIVATION_ATR` | `1.0` | ATR multiplier to activate |
+| `BREAK_EVEN_BUFFER_POINTS` | `20` | Points above entry (covers commission) |
+| `ENABLE_PARTIAL_CLOSE` | `True` | Master switch for partial close |
+| `PARTIAL_CLOSE_ACTIVATION_ATR` | `1.5` | ATR multiplier to activate |
+| `PARTIAL_CLOSE_VOLUME_PCT` | `0.5` | Fraction of lot to close (50%) |
+| `TRAILING_ACTIVATION_ATR` | `2.0` | ATR multiplier to activate trailing |
+| `TRAILING_DRAWDOWN_ATR` | `0.5` | ATR multiplier for max retrace |
+
+---
+
+## 📰 News Filter (`core/news_filter.py`)
 
 Fetches the Forex Factory economic calendar (weekly JSON endpoint) and detects imminent high-impact events.
 
@@ -153,53 +213,51 @@ Flow:
 
 ---
 
-## 🔁 V3: ATR-Based Dynamic Trailing Stop
-
-Replaces fixed-point trailing (V2: 300/200 points) with ATR-adaptive thresholds.
-
-| Parameter | Default | Formula |
-|---|---|---|
-| `TRAILING_ACTIVATION_ATR` | `1.0` | Activate at `1.0 × ATR` profit (in points) |
-| `TRAILING_DRAWDOWN_ATR` | `0.5` | Close if retraces `0.5 × ATR` from peak |
-
-**Behavior:**
-- **Ranging market** (low ATR): Tight trailing — locks in small profits quickly
-- **Trending market** (high ATR): Wide trailing — lets winners run to full potential
-- Logged as `TRAILING_STOP` close reason in dashboard
-
----
-
 ## ⚙️ Live Execution Pipeline (`scripts/run_live.py`)
 
-The `LiveEngine` fires once per bar close and executes a 14-step pipeline:
+The `LiveEngine` fires once per bar close and executes a **15-step pipeline**:
 
 ```
  1.  Sync position state with broker (detect TP/SL hits)
  2.  Fetch fresh OHLCV + compute features
- 3.  Compute & store ATR (used by trailing stop + dispatch)
+ 3.  Compute & store ATR (used by profit locking + dispatch)
+ 3b. Profit locking check (Break-Even + Partial Close)
  4.  ATR trailing stop check (overrides AI)
  5.  Detect regime (Meta-Router)
  5b. News filter override (force HIGH_VOLATILITY if blackout)
  6.  Regime-shift protocol (Clean Slate — force close)
  7.  Risk checks (drawdown, circuit breaker)
  8.  Time stop check
- 9.  Z-Score normalize observation
- 9b. Anomaly detection (warn if any feature > 5.0 STD)
- 9c. Hard clip features to ±10.0 (prevent hallucinations)
+ 9.  Z-Score normalize observation (min std=0.01)
+ 9b. Hard clip features to ±10.0 (sanitize extreme values)
+ 9c. Post-clip verification (confirm data ≤ ±10.0, detect NaN/Inf leaks)
 10.  Inference Telemetry — extract action probs + critic value
 11.  Predict action (PPO model, deterministic)
 12.  Map to actual action (regime-specific action space)
-12b. Log telemetry (confidence %, critic value, per-action probs)
 12c. Confidence gate — force HOLD if confidence < 75%
+12b. Log telemetry (confidence %, critic value, per-action probs)
 13.  Dispatch with position-aware logic (Anti-Martingale)
 14.  Log bar result
 ```
 
-**Additional features:**
+### Position-Aware Dispatch Logic (Step 13)
+
+| State | AI Signal | Action |
+|---|---|---|
+| Flat (no position) | HOLD | Do nothing (wait) |
+| In position | HOLD | Voluntary close |
+| Flat | BUY or SELL | Open new position |
+| In BUY position | BUY | PASS (Anti-Martingale) |
+| In BUY position | SELL | Close BUY (don't reopen this bar) |
+| In SELL position | SELL | PASS (Anti-Martingale) |
+| In SELL position | BUY | Close SELL (don't reopen this bar) |
+
+### Additional Features
+
 - MT5 auto-reconnect (5 attempts × 5s interval)
 - Daily rotating log (`logs/live/live_trading.log`, 30-day retention)
 - All `core/` modules log to unified `"apex_live"` logger
-- Graceful shutdown on Ctrl+C (closes open trades)
+- Graceful shutdown on Ctrl+C (closes open trades before exit)
 
 ---
 
@@ -222,7 +280,7 @@ python -m scripts.analyze_live_logs --csv trades.csv    # export to CSV
 | **Overall Trade Metrics** | Win Rate, Profit Factor, Expectancy, Avg Win/Loss, Max Drawdown |
 | **Institutional Risk Metrics** | Sharpe Ratio, Sortino Ratio, Calmar Ratio, Payoff Ratio, Gross P/L |
 | **Win Rate by Agent** | Per-regime: Trades, Wins, WR%, PF, Net P&L, Avg P&L |
-| **Close Reason Breakdown** | TP/SL_HIT, TRAILING_STOP, VOLUNTARY_CLOSE, REGIME_SHIFT, TIME_STOP, … |
+| **Close Reason Breakdown** | TP/SL_HIT, TRAILING_STOP, VOLUNTARY_CLOSE, REGIME_SHIFT, BREAK_EVEN, PARTIAL_CLOSE, … |
 | **Action Distribution** | HOLD / BUY / SELL counts with bar chart |
 | **Regime Distribution** | Bars per regime with bar chart |
 | **AI Inference Telemetry** | Avg/Min/Max Confidence %, Critic Value stats, per-regime confidence, anomaly count |
@@ -248,11 +306,11 @@ ApexPredatorV2/
 │   └── __init__.py              # All tunable parameters & constants
 ├── core/
 │   ├── __init__.py
-│   ├── perception_engine.py     # Layer 1 — MT5 + 13 features + symbol info
-│   ├── meta_router.py           # Layer 2 — Deterministic regime detection
-│   ├── news_filter.py           # V3 — Forex Factory calendar integration
+│   ├── perception_engine.py     # Layer 1 — MT5 + 13 features + data sanitization
+│   ├── meta_router.py           # Layer 2 — Deterministic regime detection (ADX/DI)
+│   ├── news_filter.py           # News — Forex Factory calendar integration
 │   ├── risk_manager.py          # Layer 4a — Position sizing, time stop, circuit breaker
-│   ├── execution_engine.py      # Layer 4b — MT5 order execution with SL/TP
+│   ├── execution_engine.py      # Layer 4b — MT5 orders + dynamic filling + retry
 │   ├── backtest_engine.py       # Historical backtesting
 │   ├── agents/
 │   │   ├── __init__.py
@@ -270,7 +328,7 @@ ApexPredatorV2/
 │   └── training_logger.py       # Metrics capture (obs_stats, episodes, actions)
 ├── scripts/
 │   ├── __init__.py
-│   ├── run_live.py              # 🔴 Live execution engine (13-step pipeline)
+│   ├── run_live.py              # 🔴 Live execution engine (15-step pipeline)
 │   ├── analyze_live_logs.py     # 📊 Live performance dashboard
 │   ├── analyze_training.py      # Training session analysis & comparison
 │   ├── run_backtest.py          # Historical backtest runner
@@ -308,6 +366,7 @@ ApexPredatorV2/
 | Gym Environment | Gymnasium | ≥ 0.29.0 |
 | Technical Analysis | `ta` library | ≥ 0.11.0 |
 | Data Processing | pandas + numpy | ≥ 2.0 / ≥ 1.24 |
+| Deep Learning | PyTorch (via SB3) | ≥ 2.0 |
 | Serialization | pyarrow (parquet) | ≥ 14.0 |
 | Environment Vars | python-dotenv | ≥ 1.0 |
 | Gym Compatibility | shimmy | ≥ 1.3.0 |
@@ -408,7 +467,7 @@ python -m scripts.analyze_live_logs --csv trades.csv
 
 | Parameter | Default | Description |
 |---|---|---|
-| `RISK_PER_TRADE_PCT` | `15.0` | % of equity at risk per trade (overclock for wide SL) |
+| `RISK_PER_TRADE_PCT` | `15.0` | % of equity at risk per trade |
 | `MAX_DRAWDOWN_PCT` | `60.0` | Hard stop — halts all trading |
 | `CONSECUTIVE_LOSS_LIMIT` | `5` | Losses before circuit breaker |
 | `HALT_MINUTES` | `30` | Circuit breaker cool-off |
@@ -420,8 +479,19 @@ python -m scripts.analyze_live_logs --csv trades.csv
 |---|---|---|
 | `SLIPPAGE_POINTS` | `30` | Max slippage deviation |
 | `ATR_SL_MULTIPLIER` | `1.5` | SL = 1.5 × ATR |
-| `ATR_TP_MULTIPLIER` | 1.5–3.0 | Per-regime TP multiplier |
-| `TRAILING_ACTIVATION_ATR` | `1.0` | Trailing activates at 1.0 × ATR profit |
+| `ATR_TP_MULTIPLIER` | 1.0–2.0 | Per-regime TP (MR=1.0, HV=1.5, TU/TD=2.0) |
+
+### Profit Locking
+
+| Parameter | Default | Description |
+|---|---|---|
+| `ENABLE_BREAK_EVEN` | `True` | Move SL to entry when profitable |
+| `BREAK_EVEN_ACTIVATION_ATR` | `1.0` | Profit threshold (ATR multiplier) |
+| `BREAK_EVEN_BUFFER_POINTS` | `20` | Points above entry (covers commission) |
+| `ENABLE_PARTIAL_CLOSE` | `True` | Close 50% at profit target |
+| `PARTIAL_CLOSE_ACTIVATION_ATR` | `1.5` | Profit threshold (ATR multiplier) |
+| `PARTIAL_CLOSE_VOLUME_PCT` | `0.5` | Fraction of lot to close |
+| `TRAILING_ACTIVATION_ATR` | `2.0` | Trailing activates at 2.0 × ATR profit |
 | `TRAILING_DRAWDOWN_ATR` | `0.5` | Trailing closes on 0.5 × ATR retrace |
 
 ### Inference Safety Guards
@@ -473,6 +543,8 @@ logs/training/{regime_lower}/{session_id}/
 4. **Type hints everywhere** — `from __future__ import annotations` in every file
 5. **All loggers → `"apex_live"`** — Unified log routing for live engine
 6. **One position max** — Anti-Martingale enforced at execution layer
+7. **Clip before predict** — Data sanitization must happen before model inference
+8. **Dynamic filling** — Never hardcode `ORDER_FILLING_IOC`; always auto-detect
 
 ---
 
