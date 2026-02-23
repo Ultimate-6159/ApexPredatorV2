@@ -427,17 +427,18 @@ class LiveEngine:
             obs_normalized = _normalize_obs(raw_obs, agent_data["stats"])
             obs_ready = obs_normalized.reshape(1, -1)
 
-            # 9b. Anomaly detection — flag extreme Z-Score features
-            max_feature_val = float(np.max(np.abs(obs_ready)))
-            if max_feature_val > 5.0:
-                self.log.warning(
-                    "⚠️ ANOMALY DETECTED: Extreme feature value "
-                    "(%.2f STD). AI may act unpredictably!",
-                    max_feature_val,
-                )
-
-            # 9c. Hard clip — prevent billion-STD hallucinations
+            # 9b. Hard clip — sanitize extreme Z-Score values
             obs_ready = np.clip(obs_ready, -OBS_CLIP_RANGE, OBS_CLIP_RANGE)
+
+            # 9c. Post-clip verification — confirm data is within ±10.0
+            max_feature_val = float(np.max(np.abs(obs_ready)))
+            if max_feature_val > OBS_CLIP_RANGE:
+                self.log.warning(
+                    "⚠️ ANOMALY: Post-clip value %.2f exceeds ±%.1f "
+                    "— NaN/Inf leak detected!",
+                    max_feature_val,
+                    OBS_CLIP_RANGE,
+                )
 
             # 10. Inference Telemetry — extract probabilities + critic value
             agent_model: PPO = agent_data["model"]

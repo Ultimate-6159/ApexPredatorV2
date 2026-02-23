@@ -37,6 +37,17 @@ class ExecutionEngine:
         self.risk = risk_manager
         self.symbol = symbol
 
+    # ── Filling Mode Detection ────────────────────
+    def _get_filling_type(self) -> int:
+        """Detect broker-supported order filling mode."""
+        info = mt5.symbol_info(self.symbol)
+        if info is not None:
+            if info.filling_mode & 2:  # SYMBOL_FILLING_IOC
+                return mt5.ORDER_FILLING_IOC
+            if info.filling_mode & 1:  # SYMBOL_FILLING_FOK
+                return mt5.ORDER_FILLING_FOK
+        return mt5.ORDER_FILLING_RETURN
+
     # ── Public API ────────────────────────────────
     def execute_action(
         self,
@@ -87,10 +98,22 @@ class ExecutionEngine:
             "magic": MAGIC_NUMBER,
             "comment": ORDER_COMMENT,
             "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_filling": self._get_filling_type(),
         }
 
         result = mt5.order_send(request)
+
+        # Retry with alternative filling modes on Invalid Request
+        if result is not None and result.retcode == 10013:
+            logger.warning("Open order retcode=10013 — trying alternative filling modes")
+            for alt in [mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_RETURN]:
+                if alt == request["type_filling"]:
+                    continue
+                request["type_filling"] = alt
+                result = mt5.order_send(request)
+                if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
+                    break
+
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
             logger.error("Order FAILED: %s", result)
             return False
@@ -116,6 +139,17 @@ class ExecutionEngine:
         if trade is None:
             return False
 
+        # Fetch live position for accurate volume & ticket
+        actual_volume = trade.lot
+        actual_ticket = trade.ticket
+        positions = mt5.positions_get(symbol=self.symbol)
+        if positions:
+            for pos in positions:
+                if pos.magic == MAGIC_NUMBER and pos.ticket == trade.ticket:
+                    actual_volume = pos.volume
+                    actual_ticket = pos.ticket
+                    break
+
         tick = mt5.symbol_info_tick(self.symbol)
         if tick is None:
             logger.error("Cannot get tick to close trade")
@@ -127,24 +161,36 @@ class ExecutionEngine:
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": self.symbol,
-            "volume": trade.lot,
+            "volume": actual_volume,
             "type": close_type,
-            "position": trade.ticket,
+            "position": actual_ticket,
             "price": close_price,
             "deviation": SLIPPAGE_POINTS,
             "magic": MAGIC_NUMBER,
             "comment": f"{ORDER_COMMENT}_{reason}",
             "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_filling": self._get_filling_type(),
         }
 
         result = mt5.order_send(request)
+
+        # Retry with alternative filling modes on Invalid Request
+        if result is not None and result.retcode == 10013:
+            logger.warning("Close retcode=10013 — trying alternative filling modes")
+            for alt in [mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_RETURN]:
+                if alt == request["type_filling"]:
+                    continue
+                request["type_filling"] = alt
+                result = mt5.order_send(request)
+                if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
+                    break
+
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
             logger.error("Close FAILED (%s): %s", reason, result)
             return False
 
         pnl = (close_price - trade.entry_price) if trade.direction == "BUY" else (trade.entry_price - close_price)
-        pnl_money = pnl * trade.lot * (mt5.symbol_info(self.symbol).trade_contract_size if mt5.symbol_info(self.symbol) else 1)
+        pnl_money = pnl * actual_volume * (mt5.symbol_info(self.symbol).trade_contract_size if mt5.symbol_info(self.symbol) else 1)
         logger.info(
             "Trade #%d CLOSED (%s) [%s %s] @ %.2f  PnL=%.2f",
             trade.ticket,
@@ -206,10 +252,22 @@ class ExecutionEngine:
             "magic": MAGIC_NUMBER,
             "comment": f"{ORDER_COMMENT}_PARTIAL",
             "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_filling": self._get_filling_type(),
         }
 
         result = mt5.order_send(request)
+
+        # Retry with alternative filling modes on Invalid Request
+        if result is not None and result.retcode == 10013:
+            logger.warning("Partial close retcode=10013 — trying alternative filling modes")
+            for alt in [mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_RETURN]:
+                if alt == request["type_filling"]:
+                    continue
+                request["type_filling"] = alt
+                result = mt5.order_send(request)
+                if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
+                    break
+
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
             logger.error("Partial close FAILED: %s", result)
             return False
