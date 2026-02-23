@@ -156,3 +156,70 @@ class ExecutionEngine:
         )
         self.risk.register_close(pnl_money)
         return True
+
+    # ── Modify SL (Break-Even) ───────────────────
+    def modify_sl(self, new_sl: float) -> bool:
+        """Move the SL of the current position (e.g. break-even)."""
+        trade = self.risk.open_trade
+        if trade is None:
+            return False
+
+        request = {
+            "action": mt5.TRADE_ACTION_SLTP,
+            "symbol": self.symbol,
+            "position": trade.ticket,
+            "sl": new_sl,
+            "tp": trade.tp,
+        }
+
+        result = mt5.order_send(request)
+        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            logger.error("Modify SL FAILED: %s", result)
+            return False
+
+        self.risk.update_sl(new_sl)
+        return True
+
+    # ── Partial Close (Scale-Out) ────────────────
+    def partial_close(self, volume_to_close: float) -> bool:
+        """Close a portion of the open position."""
+        trade = self.risk.open_trade
+        if trade is None:
+            return False
+
+        tick = mt5.symbol_info_tick(self.symbol)
+        if tick is None:
+            logger.error("Cannot get tick for partial close")
+            return False
+
+        close_price = tick.bid if trade.direction == "BUY" else tick.ask
+        close_type = mt5.ORDER_TYPE_SELL if trade.direction == "BUY" else mt5.ORDER_TYPE_BUY
+
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": self.symbol,
+            "volume": volume_to_close,
+            "type": close_type,
+            "position": trade.ticket,
+            "price": close_price,
+            "deviation": SLIPPAGE_POINTS,
+            "magic": MAGIC_NUMBER,
+            "comment": f"{ORDER_COMMENT}_PARTIAL",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_IOC,
+        }
+
+        result = mt5.order_send(request)
+        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            logger.error("Partial close FAILED: %s", result)
+            return False
+
+        remaining = round(trade.lot - volume_to_close, 2)
+        self.risk.update_lot(remaining)
+        logger.info(
+            "Partial close FILLED: ticket=%d  closed %.2f lots  remaining %.2f lots",
+            trade.ticket,
+            volume_to_close,
+            remaining,
+        )
+        return True

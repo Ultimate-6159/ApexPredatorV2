@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
 import sys
 import time
@@ -48,7 +49,11 @@ from config import (
     ACTION_SELL,
     AGENT_ACTION_MAP,
     ATR_PERIOD,
+    BREAK_EVEN_ACTIVATION_ATR,
+    BREAK_EVEN_BUFFER_POINTS,
     CONFIDENCE_GATE_PCT,
+    ENABLE_BREAK_EVEN,
+    ENABLE_PARTIAL_CLOSE,
     MAGIC_NUMBER,
     MODEL_DIR,
     NEWS_BLACKOUT_MINUTES,
@@ -56,6 +61,8 @@ from config import (
     NEWS_CURRENCIES,
     NEWS_FILTER_ENABLED,
     OBS_CLIP_RANGE,
+    PARTIAL_CLOSE_ACTIVATION_ATR,
+    PARTIAL_CLOSE_VOLUME_PCT,
     SYMBOL,
     TIMEFRAME_NAME,
     TRAILING_ACTIVATION_ATR,
@@ -231,6 +238,10 @@ class LiveEngine:
         self._trailing_ticket: int | None = None
         self._highest_profit_points: float = 0.0
 
+        # Profit locking state (Break-Even + Partial Close)
+        self._break_even_done: bool = False
+        self._partial_close_done: bool = False
+
         # News filter
         self.news_filter: NewsFilter | None = None
         if NEWS_FILTER_ENABLED:
@@ -369,6 +380,9 @@ class LiveEngine:
             hl_range = (ohlcv["High"] - ohlcv["Low"]).rolling(ATR_PERIOD).mean()
             self._current_atr = float(hl_range.iloc[-1]) if not hl_range.empty else 0.0
 
+            # 3b. Profit locking (Break-Even + Partial Close)
+            self._check_profit_locking()
+
             # 4. Trailing stop check (ATR-based, overrides AI)
             self._check_trailing_stop()
 
@@ -498,6 +512,97 @@ class LiveEngine:
 
         except Exception:
             self.log.exception("Error processing bar #%d", self._bar_count)
+
+    # ── Profit Locking  (Break-Even + Partial Close) ─
+    def _check_profit_locking(self) -> None:
+        """Auto Break-Even + Partial Close profit protection.
+
+        Journey:
+          1.0 × ATR profit → move SL to entry (risk-free trade)
+          1.5 × ATR profit → close 50% of position (cash in pocket)
+          2.0 × ATR profit → trailing stop takes over (tight lock)
+        """
+        if not self.risk.has_open_trade:
+            self._break_even_done = False
+            self._partial_close_done = False
+            return
+
+        if self._current_atr <= 0:
+            return
+
+        trade = self.risk.open_trade
+        sym = self.perception.get_symbol_info()
+        point = sym["point"]
+
+        tick = mt5.symbol_info_tick(self.symbol)
+        if tick is None:
+            return
+
+        # Profit in price distance (direction-aware)
+        if trade.direction == "BUY":
+            profit_dist = tick.bid - trade.entry_price
+        else:
+            profit_dist = trade.entry_price - tick.ask
+
+        # 1. Break-Even: Move SL to entry + buffer
+        if (
+            ENABLE_BREAK_EVEN
+            and not self._break_even_done
+            and profit_dist >= BREAK_EVEN_ACTIVATION_ATR * self._current_atr
+        ):
+            if trade.direction == "BUY":
+                new_sl = trade.entry_price + (BREAK_EVEN_BUFFER_POINTS * point)
+            else:
+                new_sl = trade.entry_price - (BREAK_EVEN_BUFFER_POINTS * point)
+            new_sl = round(new_sl, 2)
+
+            # Only move if it improves the position
+            should_move = (
+                (trade.direction == "BUY" and new_sl > trade.sl)
+                or (trade.direction == "SELL" and new_sl < trade.sl)
+            )
+
+            if should_move and self.executor.modify_sl(new_sl):
+                self.log.info(
+                    "🛡️ BREAK-EVEN ACTIVATED for Ticket #%d "
+                    "(SL moved to %.2f — Risk-Free Trade)",
+                    trade.ticket,
+                    new_sl,
+                )
+                self._break_even_done = True
+
+        # 2. Partial Close: Close 50% of position
+        if (
+            ENABLE_PARTIAL_CLOSE
+            and not self._partial_close_done
+            and profit_dist >= PARTIAL_CLOSE_ACTIVATION_ATR * self._current_atr
+        ):
+            vol_step = sym["volume_step"]
+            vol_min = sym["volume_min"]
+
+            volume_to_close = trade.lot * PARTIAL_CLOSE_VOLUME_PCT
+            volume_to_close = math.floor(volume_to_close / vol_step) * vol_step
+            volume_to_close = round(volume_to_close, 2)
+            remaining = round(trade.lot - volume_to_close, 2)
+
+            if volume_to_close >= vol_min and remaining >= vol_min:
+                if self.executor.partial_close(volume_to_close):
+                    self.log.info(
+                        "💰 PARTIAL CLOSE: Secured 50%% profit for Ticket #%d "
+                        "(closed %.2f lots, remaining %.2f lots)",
+                        trade.ticket,
+                        volume_to_close,
+                        remaining,
+                    )
+                    self._partial_close_done = True
+            else:
+                self.log.debug(
+                    "Partial close skipped — lot too small "
+                    "(total=%.2f, to_close=%.2f, min=%.2f)",
+                    trade.lot,
+                    volume_to_close,
+                    vol_min,
+                )
 
     # ── Trailing Stop  (ATR-Based Dynamic) ────
     def _check_trailing_stop(self) -> None:

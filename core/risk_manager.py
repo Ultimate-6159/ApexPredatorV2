@@ -170,7 +170,17 @@ class RiskManager:
 
         self._open_trade = None
 
-    # ── Drawdown Check ────────────────────────────
+    def update_sl(self, new_sl: float) -> None:
+        """Update tracked SL after modification (e.g. break-even)."""
+        if self._open_trade is not None:
+            self._open_trade.sl = new_sl
+
+    def update_lot(self, new_lot: float) -> None:
+        """Update tracked lot after partial close."""
+        if self._open_trade is not None:
+            self._open_trade.lot = new_lot
+
+    # ── Drawdown Check ────────────────────────
     def check_drawdown(self, current_balance: float) -> bool:
         """Return True if max drawdown breached → full stop."""
         if self._starting_balance is None:

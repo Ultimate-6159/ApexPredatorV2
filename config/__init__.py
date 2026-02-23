@@ -48,16 +48,16 @@ ACTION_BUY: int = 1
 ACTION_SELL: int = 2
 
 AGENT_ACTION_MAP: dict[Regime, list[int]] = {
-    Regime.TRENDING_UP:      [ACTION_HOLD, ACTION_BUY],               # Bull Rider
-    Regime.TRENDING_DOWN:    [ACTION_HOLD, ACTION_SELL],              # Bear Hunter
-    Regime.MEAN_REVERTING:   [ACTION_HOLD, ACTION_BUY, ACTION_SELL],  # Range Sniper
-    Regime.HIGH_VOLATILITY:  [ACTION_HOLD, ACTION_BUY, ACTION_SELL],  # Vol Assassin
+    Regime.TRENDING_UP:      [ACTION_HOLD, ACTION_BUY,  ACTION_SELL],  # Bull Rider  (model idx1=BUY)
+    Regime.TRENDING_DOWN:    [ACTION_HOLD, ACTION_SELL, ACTION_BUY],   # Bear Hunter (model idx1=SELL — safe order)
+    Regime.MEAN_REVERTING:   [ACTION_HOLD, ACTION_BUY,  ACTION_SELL],  # Range Sniper
+    Regime.HIGH_VOLATILITY:  [ACTION_HOLD, ACTION_BUY,  ACTION_SELL],  # Vol Assassin
 }
 
 # ──────────────────────────────────────────────
 # Risk Management
 # ──────────────────────────────────────────────
-RISK_PER_TRADE_PCT: float = 20.0  # 20 % of equity (bigger lots, targets 0.10-0.20 lot with 1.5 ATR SL)
+RISK_PER_TRADE_PCT: float = 15.0  # 15 % of equity (wide 1.5×ATR SL + high risk = same lot size)
 MAX_DRAWDOWN_PCT: float = 60.0    # 60 % hard stop (accommodates aggressive risk per trade)
 CONSECUTIVE_LOSS_LIMIT: int = 5
 HALT_MINUTES: int = 30            # Cool-off after consecutive losses
@@ -84,13 +84,22 @@ ATR_SL_MULTIPLIER: float = 1.5
 ATR_TP_MULTIPLIER: dict[Regime, float] = {
     Regime.TRENDING_UP:     2.0,
     Regime.TRENDING_DOWN:   2.0,
-    Regime.MEAN_REVERTING:  1.5,
+    Regime.MEAN_REVERTING:  1.0,
     Regime.HIGH_VOLATILITY: 1.5,
 }
 
 # Trailing Stop (ATR-based — adapts to volatility)
-TRAILING_ACTIVATION_ATR: float = 1.0    # Activate after 1.0 × ATR profit
+TRAILING_ACTIVATION_ATR: float = 2.0    # Activate after 2.0 × ATR profit (after partial close)
 TRAILING_DRAWDOWN_ATR: float = 0.5      # Force close if retraces 0.5 × ATR from peak
+
+# Profit Locking Strategy (Break-Even + Partial Close)
+ENABLE_BREAK_EVEN: bool = True
+BREAK_EVEN_ACTIVATION_ATR: float = 1.0  # Move SL to entry when profit >= 1.0 × ATR
+BREAK_EVEN_BUFFER_POINTS: int = 20      # Extra points above entry to cover commission/swap
+
+ENABLE_PARTIAL_CLOSE: bool = True
+PARTIAL_CLOSE_ACTIVATION_ATR: float = 1.5  # Close 50% when profit >= 1.5 × ATR
+PARTIAL_CLOSE_VOLUME_PCT: float = 0.5      # Fraction of lot to close (0.5 = 50%)
 
 # Inference Safety Guards
 OBS_CLIP_RANGE: float = 10.0             # Hard clip Z-Score features to ± this value
