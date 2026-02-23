@@ -82,15 +82,15 @@ DEFAULT_SL_PIPS: float = 30.0
 DEFAULT_TP_PIPS: float = 60.0
 ATR_SL_MULTIPLIER: float = 1.5
 ATR_TP_MULTIPLIER: dict[Regime, float] = {
-    Regime.TRENDING_UP:     2.0,
-    Regime.TRENDING_DOWN:   2.0,
+    Regime.TRENDING_UP:     1.68,   # Ghost TP — avoids round-number stop hunts
+    Regime.TRENDING_DOWN:   1.68,
     Regime.MEAN_REVERTING:  1.0,
     Regime.HIGH_VOLATILITY: 1.5,
 }
 
 # Trailing Stop (ATR-based — adapts to volatility)
-TRAILING_ACTIVATION_ATR: float = 0.5    # Activate after 0.5 × ATR profit (aggressive lock)
-TRAILING_DRAWDOWN_ATR: float = 0.3      # Force close if retraces 0.3 × ATR from peak
+TRAILING_ACTIVATION_ATR: float = 0.8    # Activate after 0.8 × ATR profit (survive M5 noise)
+TRAILING_DRAWDOWN_ATR: float = 0.5      # Force close if retraces 0.5 × ATR from peak
 
 # Profit Locking Strategy (Break-Even + Partial Close)
 ENABLE_BREAK_EVEN: bool = True
