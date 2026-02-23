@@ -57,8 +57,8 @@ AGENT_ACTION_MAP: dict[Regime, list[int]] = {
 # ──────────────────────────────────────────────
 # Risk Management
 # ──────────────────────────────────────────────
-RISK_PER_TRADE_PCT: float = 15.0  # 15 % of equity (overclock to maintain 0.10-0.15 lot with 1.5 ATR SL)
-MAX_DRAWDOWN_PCT: float = 60.0    # 60 % hard stop (accommodates 15% risk per trade)
+RISK_PER_TRADE_PCT: float = 20.0  # 20 % of equity (bigger lots, targets 0.10-0.20 lot with 1.5 ATR SL)
+MAX_DRAWDOWN_PCT: float = 60.0    # 60 % hard stop (accommodates aggressive risk per trade)
 CONSECUTIVE_LOSS_LIMIT: int = 5
 HALT_MINUTES: int = 30            # Cool-off after consecutive losses
 
@@ -82,10 +82,10 @@ DEFAULT_SL_PIPS: float = 30.0
 DEFAULT_TP_PIPS: float = 60.0
 ATR_SL_MULTIPLIER: float = 1.5
 ATR_TP_MULTIPLIER: dict[Regime, float] = {
-    Regime.TRENDING_UP:     3.0,
-    Regime.TRENDING_DOWN:   3.0,
+    Regime.TRENDING_UP:     2.0,
+    Regime.TRENDING_DOWN:   2.0,
     Regime.MEAN_REVERTING:  1.5,
-    Regime.HIGH_VOLATILITY: 2.0,
+    Regime.HIGH_VOLATILITY: 1.5,
 }
 
 # Trailing Stop (ATR-based — adapts to volatility)

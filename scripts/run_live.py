@@ -195,6 +195,7 @@ def _normalize_obs(
 
     mean = np.array(stats["mean"], dtype=np.float32)
     std = np.array(stats["std"], dtype=np.float32)
+    std = np.maximum(std, 0.01)
     return (raw_obs - mean) / (std + 1e-8)
 
 
