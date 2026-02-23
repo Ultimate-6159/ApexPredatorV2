@@ -89,16 +89,16 @@ ATR_TP_MULTIPLIER: dict[Regime, float] = {
 }
 
 # Trailing Stop (ATR-based — adapts to volatility)
-TRAILING_ACTIVATION_ATR: float = 2.0    # Activate after 2.0 × ATR profit (after partial close)
-TRAILING_DRAWDOWN_ATR: float = 0.5      # Force close if retraces 0.5 × ATR from peak
+TRAILING_ACTIVATION_ATR: float = 0.5    # Activate after 0.5 × ATR profit (aggressive lock)
+TRAILING_DRAWDOWN_ATR: float = 0.3      # Force close if retraces 0.3 × ATR from peak
 
 # Profit Locking Strategy (Break-Even + Partial Close)
 ENABLE_BREAK_EVEN: bool = True
-BREAK_EVEN_ACTIVATION_ATR: float = 1.0  # Move SL to entry when profit >= 1.0 × ATR
+BREAK_EVEN_ACTIVATION_ATR: float = 0.5  # Move SL to entry when profit >= 0.5 × ATR
 BREAK_EVEN_BUFFER_POINTS: int = 20      # Extra points above entry to cover commission/swap
 
 ENABLE_PARTIAL_CLOSE: bool = True
-PARTIAL_CLOSE_ACTIVATION_ATR: float = 1.5  # Close 50% when profit >= 1.5 × ATR
+PARTIAL_CLOSE_ACTIVATION_ATR: float = 1.0  # Close 50% when profit >= 1.0 × ATR
 PARTIAL_CLOSE_VOLUME_PCT: float = 0.5      # Fraction of lot to close (0.5 = 50%)
 
 # Inference Safety Guards

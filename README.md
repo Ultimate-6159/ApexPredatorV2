@@ -15,7 +15,7 @@ Apex Predator V2 solves **Catastrophic Forgetting** — the #1 failure mode of s
 | **Mixture of Experts** | 4 PPO agents, each mastering one market regime |
 | **13 Noise-Free Features** | RSI, BB, EMA, ADX, ATR, Volume Z-Score, etc. |
 | **ATR-Based Dynamic SL/TP** | Per-regime multipliers adapt to volatility |
-| **3-Stage Profit Locking** | Break-Even (1.0×ATR) → Partial Close 50% (1.5×ATR) → Trailing Stop (2.0×ATR) |
+| **3-Stage Profit Locking** | Break-Even (0.5×ATR) → Partial Close 50% (1.0×ATR) → Trailing Stop (0.5×ATR) |
 | **News Filter** | Forex Factory calendar forces HIGH_VOLATILITY before red events |
 | **Dynamic Position Sizing** | `tick_value`-based formula using equity (compound growth) |
 | **Dynamic Filling Mode** | Auto-detects broker-supported IOC/FOK/RETURN + retry on error 10013 |
@@ -144,9 +144,9 @@ Each agent is a PPO model trained in a custom Gymnasium environment with regime-
 | **Risk Per Trade** | `15%` | Aggressive sizing (overclock for 1.5×ATR SL) |
 | **ATR SL** | `1.5 × ATR` | Dynamic stop-loss adapts to volatility |
 | **ATR TP** | `1.0–2.0 × ATR` | Per-regime take-profit (MR=1.0, HV=1.5, TU/TD=2.0) |
-| **Break-Even** | `1.0 × ATR` | Move SL to entry + 20pts buffer |
-| **Partial Close** | `1.5 × ATR` | Close 50% of position to lock profit |
-| **Trailing Stop** | `2.0 × ATR` / `0.5 × ATR` | Activation / drawdown thresholds |
+| **Break-Even** | `0.5 × ATR` | Move SL to entry + 20pts buffer |
+| **Partial Close** | `1.0 × ATR` | Close 50% of position to lock profit |
+| **Trailing Stop** | `0.5 × ATR` / `0.3 × ATR` | Activation / drawdown thresholds |
 | **Time Stop** | 5–20 bars | Force-close after N bars (per regime) |
 | **Regime-Shift Exit** | Immediate | Close all on regime change (Clean Slate) |
 | **Circuit Breaker** | 5 losses → 30 min | Halt trading after consecutive losses |
@@ -162,30 +162,30 @@ Each agent is a PPO model trained in a custom Gymnasium environment with regime-
 The profit locking system protects unrealized profit in 3 progressive stages:
 
 ```
-Entry ─────── 1.0×ATR ──────── 1.5×ATR ──────── 2.0×ATR ───────── TP
+Entry ─────── 0.5×ATR ──────── 1.0×ATR ──────── 0.5×ATR+ ───────── TP
               🛡️ Break-Even    💰 Partial Close   📈 Trailing Stop
               SL → Entry+20pts  Close 50% lots    Lock peak, close
-                                                   on 0.5×ATR retrace
+                                                   on 0.3×ATR retrace
 ```
 
 | Stage | Trigger | Action | Effect |
 |---|---|---|---|
-| 🛡️ **Break-Even** | Profit ≥ 1.0 × ATR | Move SL to entry + 20 points | Risk-free trade |
-| 💰 **Partial Close** | Profit ≥ 1.5 × ATR | Close 50% of position | Cash in pocket |
-| 📈 **Trailing Stop** | Profit ≥ 2.0 × ATR | Track peak, close on 0.5×ATR retrace | Let winners run |
+| 🛡️ **Break-Even** | Profit ≥ 0.5 × ATR | Move SL to entry + 20 points | Risk-free trade |
+| 💰 **Partial Close** | Profit ≥ 1.0 × ATR | Close 50% of position | Cash in pocket |
+| 📈 **Trailing Stop** | Profit ≥ 0.5 × ATR | Track peak, close on 0.3×ATR retrace | Let winners run |
 
 **Config:**
 
 | Parameter | Default | Description |
 |---|---|---|
 | `ENABLE_BREAK_EVEN` | `True` | Master switch for break-even |
-| `BREAK_EVEN_ACTIVATION_ATR` | `1.0` | ATR multiplier to activate |
+| `BREAK_EVEN_ACTIVATION_ATR` | `0.5` | ATR multiplier to activate |
 | `BREAK_EVEN_BUFFER_POINTS` | `20` | Points above entry (covers commission) |
 | `ENABLE_PARTIAL_CLOSE` | `True` | Master switch for partial close |
-| `PARTIAL_CLOSE_ACTIVATION_ATR` | `1.5` | ATR multiplier to activate |
+| `PARTIAL_CLOSE_ACTIVATION_ATR` | `1.0` | ATR multiplier to activate |
 | `PARTIAL_CLOSE_VOLUME_PCT` | `0.5` | Fraction of lot to close (50%) |
-| `TRAILING_ACTIVATION_ATR` | `2.0` | ATR multiplier to activate trailing |
-| `TRAILING_DRAWDOWN_ATR` | `0.5` | ATR multiplier for max retrace |
+| `TRAILING_ACTIVATION_ATR` | `0.5` | ATR multiplier to activate trailing |
+| `TRAILING_DRAWDOWN_ATR` | `0.3` | ATR multiplier for max retrace |
 
 ---
 
@@ -486,13 +486,13 @@ python -m scripts.analyze_live_logs --csv trades.csv
 | Parameter | Default | Description |
 |---|---|---|
 | `ENABLE_BREAK_EVEN` | `True` | Move SL to entry when profitable |
-| `BREAK_EVEN_ACTIVATION_ATR` | `1.0` | Profit threshold (ATR multiplier) |
+| `BREAK_EVEN_ACTIVATION_ATR` | `0.5` | Profit threshold (ATR multiplier) |
 | `BREAK_EVEN_BUFFER_POINTS` | `20` | Points above entry (covers commission) |
 | `ENABLE_PARTIAL_CLOSE` | `True` | Close 50% at profit target |
-| `PARTIAL_CLOSE_ACTIVATION_ATR` | `1.5` | Profit threshold (ATR multiplier) |
+| `PARTIAL_CLOSE_ACTIVATION_ATR` | `1.0` | Profit threshold (ATR multiplier) |
 | `PARTIAL_CLOSE_VOLUME_PCT` | `0.5` | Fraction of lot to close |
-| `TRAILING_ACTIVATION_ATR` | `2.0` | Trailing activates at 2.0 × ATR profit |
-| `TRAILING_DRAWDOWN_ATR` | `0.5` | Trailing closes on 0.5 × ATR retrace |
+| `TRAILING_ACTIVATION_ATR` | `0.5` | Trailing activates at 0.5 × ATR profit |
+| `TRAILING_DRAWDOWN_ATR` | `0.3` | Trailing closes on 0.3 × ATR retrace |
 
 ### Inference Safety Guards
 
