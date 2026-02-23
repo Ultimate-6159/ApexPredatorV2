@@ -57,7 +57,7 @@ AGENT_ACTION_MAP: dict[Regime, list[int]] = {
 # ──────────────────────────────────────────────
 # Risk Management
 # ──────────────────────────────────────────────
-RISK_PER_TRADE_PCT: float = 15.0  # 15 % of equity (wide 1.5×ATR SL + high risk = same lot size)
+RISK_PER_TRADE_PCT: float = 8.0   # 8 % of equity (reduced for high-frequency scalping)
 MAX_DRAWDOWN_PCT: float = 60.0    # 60 % hard stop (accommodates aggressive risk per trade)
 CONSECUTIVE_LOSS_LIMIT: int = 5
 HALT_MINUTES: int = 30            # Cool-off after consecutive losses
@@ -94,7 +94,7 @@ TRAILING_DRAWDOWN_ATR: float = 0.4      # Force close if retraces 0.4 × ATR fro
 
 # Profit Locking Strategy (Break-Even + Partial Close)
 ENABLE_BREAK_EVEN: bool = True
-BREAK_EVEN_ACTIVATION_ATR: float = 0.4  # Move SL to entry when profit >= 0.4 × ATR (micro-lock)
+BREAK_EVEN_ACTIVATION_ATR: float = 0.5  # Move SL to entry when profit >= 0.5 × ATR (avoids gold spread noise)
 BREAK_EVEN_BUFFER_POINTS: int = 20      # Extra points above entry to cover commission/swap
 
 ENABLE_PARTIAL_CLOSE: bool = True
@@ -103,7 +103,7 @@ PARTIAL_CLOSE_VOLUME_PCT: float = 0.5      # Fraction of lot to close (0.5 = 50%
 
 # Inference Safety Guards
 OBS_CLIP_RANGE: float = 10.0             # Hard clip Z-Score features to ± this value
-CONFIDENCE_GATE_PCT: float = 70.0        # Force HOLD if AI confidence < this %
+CONFIDENCE_GATE_PCT: float = 65.0        # Force HOLD if AI confidence < this % (lowered for high-freq)
 
 # News Filter (Forex Factory calendar — forces HIGH_VOLATILITY before red news)
 NEWS_FILTER_ENABLED: bool = True

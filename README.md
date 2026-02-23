@@ -15,13 +15,13 @@ Apex Predator V2 solves **Catastrophic Forgetting** — the #1 failure mode of s
 | **Mixture of Experts** | 4 PPO agents, each mastering one market regime |
 | **13 Noise-Free Features** | RSI, BB, EMA, ADX, ATR, Volume Z-Score, etc. |
 | **ATR-Based Dynamic SL/TP** | Per-regime multipliers adapt to volatility |
-| **3-Stage Profit Locking** | Break-Even (0.4×ATR) → Partial Close 50% (1.0×ATR) → Trailing Stop (0.8×ATR) |
+| **3-Stage Profit Locking** | Break-Even (0.5×ATR) → Partial Close 50% (1.0×ATR) → Trailing Stop (0.8×ATR) |
 | **News Filter** | Forex Factory calendar forces HIGH_VOLATILITY before red events |
 | **Dynamic Position Sizing** | `tick_value`-based formula using equity (compound growth) |
 | **Dynamic Filling Mode** | Auto-detects broker-supported IOC/FOK/RETURN + retry on error 10013 |
 | **Regime-Shift Protocol** | Force-close all positions on regime change |
-| **Anti-Martingale** | Max 1 position, 15% risk, circuit breaker |
-| **Inference Safety Guards** | Z-Score clip ±10.0, confidence gate 75%, anomaly detection |
+| **Anti-Martingale** | Max 1 position, 8% risk, circuit breaker |
+| **Inference Safety Guards** | Z-Score clip ±10.0, confidence gate 65%, anomaly detection |
 | **Live Performance Dashboard** | Parses live logs → Win Rate, Profit Factor, Sharpe, Sortino, Calmar |
 
 ---
@@ -115,7 +115,7 @@ Each agent is a PPO model trained in a custom Gymnasium environment with regime-
 | ⚡ **Vol Assassin** | `HIGH_VOLATILITY` | `[HOLD, BUY, SELL]` | Breakout/squeeze trading |
 
 **Inference Safety Guards:**
-- **Confidence Gate:** If AI probability < 75% → forced HOLD (prevents noisy trades)
+- **Confidence Gate:** If AI probability < 65% → forced HOLD (prevents noisy trades)
 - **Post-Clip Verification:** After clipping to ±10.0, verify max ≤ 10.0 (detects NaN/Inf leaks)
 - **Telemetry Logging:** Per-bar action probabilities, critic value, and anomaly detection
 
@@ -141,10 +141,10 @@ Each agent is a PPO model trained in a custom Gymnasium environment with regime-
 | Feature | Parameter | Description |
 |---|---|---|
 | **Position Sizing** | `tick_value × point / tick_size` | Calculates lot from equity (compound growth) |
-| **Risk Per Trade** | `15%` | Aggressive sizing (overclock for 1.5×ATR SL) |
+| **Risk Per Trade** | `8%` | Reduced sizing for high-frequency scalping |
 | **ATR SL** | `1.5 × ATR` | Dynamic stop-loss adapts to volatility |
 | **ATR TP** | `0.80–1.50 × ATR` | Per-regime take-profit (MR=0.80, TU/TD=1.20, HV=1.50) |
-| **Break-Even** | `0.4 × ATR` | Move SL to entry + 20pts buffer |
+| **Break-Even** | `0.5 × ATR` | Move SL to entry + 20pts buffer |
 | **Partial Close** | `1.0 × ATR` | Close 50% of position to lock profit |
 | **Trailing Stop** | `0.8 × ATR` / `0.4 × ATR` | Activation / drawdown thresholds |
 | **Time Stop** | 5–20 bars | Force-close after N bars (per regime) |
@@ -153,8 +153,8 @@ Each agent is a PPO model trained in a custom Gymnasium environment with regime-
 | **Max Drawdown** | `60%` | Full stop — no more trades |
 | **Anti-Martingale** | Max 1 position | Never adds to a losing position |
 | **Slippage Protection** | 30 points | Dynamic filling mode + deviation cap |
-| **Confidence Gate** | 70% | Force HOLD if AI is uncertain |
-| **Momentum Ribbon** | EMA7 + EMA20 | Enter trends within 0.8 ATR of EMA7 |
+| **Confidence Gate** | 65% | Force HOLD if AI is uncertain |
+| **Ribbon Expansion** | EMA7 + EMA20 | True Bounce: gap ≥ 0.3×ATR + touch EMA7 + bullish/bearish close |
 | **RSI Anti-Chasing** | RSI(7) 20–80 | Block BUY if RSI≥80, block SELL if RSI≤20 |
 
 ---
@@ -164,7 +164,7 @@ Each agent is a PPO model trained in a custom Gymnasium environment with regime-
 The profit locking system protects unrealized profit in 3 progressive stages:
 
 ```
-Entry ─────── 0.4×ATR ──────── 1.0×ATR ──────── 0.8×ATR+ ───────── TP
+Entry ─────── 0.5×ATR ──────── 1.0×ATR ──────── 0.8×ATR+ ───────── TP
               🛡️ Break-Even    💰 Partial Close   📈 Trailing Stop
               SL → Entry+20pts  Close 50% lots    Lock peak, close
                                                    on 0.4×ATR retrace
@@ -172,7 +172,7 @@ Entry ─────── 0.4×ATR ──────── 1.0×ATR ───
 
 | Stage | Trigger | Action | Effect |
 |---|---|---|---|
-| 🛡️ **Break-Even** | Profit ≥ 0.4 × ATR | Move SL to entry + 20 points | Risk-free trade |
+| 🛡️ **Break-Even** | Profit ≥ 0.5 × ATR | Move SL to entry + 20 points | Risk-free trade |
 | 💰 **Partial Close** | Profit ≥ 1.0 × ATR | Close 50% of position | Cash in pocket |
 | 📈 **Trailing Stop** | Profit ≥ 0.8 × ATR | Track peak, close on 0.4×ATR retrace | Let winners run |
 
@@ -181,7 +181,7 @@ Entry ─────── 0.4×ATR ──────── 1.0×ATR ───
 | Parameter | Default | Description |
 |---|---|---|
 | `ENABLE_BREAK_EVEN` | `True` | Master switch for break-even |
-| `BREAK_EVEN_ACTIVATION_ATR` | `0.4` | ATR multiplier to activate |
+| `BREAK_EVEN_ACTIVATION_ATR` | `0.5` | ATR multiplier to activate |
 | `BREAK_EVEN_BUFFER_POINTS` | `20` | Points above entry (covers commission) |
 | `ENABLE_PARTIAL_CLOSE` | `True` | Master switch for partial close |
 | `PARTIAL_CLOSE_ACTIVATION_ATR` | `1.0` | ATR multiplier to activate |
@@ -236,7 +236,7 @@ The `LiveEngine` fires once per bar close and executes a **15-step pipeline**:
 10.  Inference Telemetry — extract action probs + critic value
 11.  Predict action (PPO model, deterministic)
 12.  Map to actual action (regime-specific action space)
-12c. Confidence gate — force HOLD if confidence < 75%
+12c. Confidence gate — force HOLD if confidence < 65%
 12b. Log telemetry (confidence %, critic value, per-action probs)
 13.  Dispatch with position-aware logic (Anti-Martingale)
 14.  Log bar result
@@ -469,7 +469,7 @@ python -m scripts.analyze_live_logs --csv trades.csv
 
 | Parameter | Default | Description |
 |---|---|---|
-| `RISK_PER_TRADE_PCT` | `15.0` | % of equity at risk per trade |
+| `RISK_PER_TRADE_PCT` | `8.0` | % of equity at risk per trade |
 | `MAX_DRAWDOWN_PCT` | `60.0` | Hard stop — halts all trading |
 | `CONSECUTIVE_LOSS_LIMIT` | `5` | Losses before circuit breaker |
 | `HALT_MINUTES` | `30` | Circuit breaker cool-off |
@@ -488,7 +488,7 @@ python -m scripts.analyze_live_logs --csv trades.csv
 | Parameter | Default | Description |
 |---|---|---|
 | `ENABLE_BREAK_EVEN` | `True` | Move SL to entry when profitable |
-| `BREAK_EVEN_ACTIVATION_ATR` | `0.4` | Profit threshold (ATR multiplier) |
+| `BREAK_EVEN_ACTIVATION_ATR` | `0.5` | Profit threshold (ATR multiplier) |
 | `BREAK_EVEN_BUFFER_POINTS` | `20` | Points above entry (covers commission) |
 | `ENABLE_PARTIAL_CLOSE` | `True` | Close 50% at profit target |
 | `PARTIAL_CLOSE_ACTIVATION_ATR` | `1.0` | Profit threshold (ATR multiplier) |
@@ -501,7 +501,7 @@ python -m scripts.analyze_live_logs --csv trades.csv
 | Parameter | Default | Description |
 |---|---|---|
 | `OBS_CLIP_RANGE` | `10.0` | Hard clip Z-Score features to ± this value |
-| `CONFIDENCE_GATE_PCT` | `70.0` | Force HOLD if AI confidence < this % |
+| `CONFIDENCE_GATE_PCT` | `65.0` | Force HOLD if AI confidence < this % |
 
 ### News Filter
 

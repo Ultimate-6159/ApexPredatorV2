@@ -496,8 +496,8 @@ class LiveEngine:
                     prob_str,
                 )
 
-            # 12d. Momentum Ribbon Filter (EMA7 + EMA20)
-            #   High-frequency entry: trade near EMA7 with EMA7/EMA20 alignment
+            # 12d. Ribbon Expansion & True Bounce Filter (EMA7 + EMA20)
+            #   Confirms momentum expansion + touch-and-bounce off EMA7
             if (
                 actual_action in (ACTION_BUY, ACTION_SELL)
                 and regime in (Regime.TRENDING_UP, Regime.TRENDING_DOWN)
@@ -506,19 +506,24 @@ class LiveEngine:
             ):
                 close_series = ohlcv["Close"]
                 current_close = float(close_series.iloc[-1])
+                current_open = float(ohlcv["Open"].iloc[-1])
+                current_high = float(ohlcv["High"].iloc[-1])
+                current_low = float(ohlcv["Low"].iloc[-1])
                 current_ema7 = float(
                     close_series.ewm(span=7, adjust=False).mean().iloc[-1]
                 )
                 current_ema20 = float(
                     close_series.ewm(span=20, adjust=False).mean().iloc[-1]
                 )
-                dist_from_ema7 = abs(current_close - current_ema7)
+                ribbon_gap = abs(current_ema7 - current_ema20)
                 rsi_fast_val = float(latest_row.get("rsi_fast", 50.0))
 
                 if actual_action == ACTION_BUY and regime == Regime.TRENDING_UP:
                     ribbon_ok = (
                         current_ema7 > current_ema20
-                        and dist_from_ema7 <= 0.8 * self._current_atr
+                        and ribbon_gap >= 0.3 * self._current_atr
+                        and current_low <= current_ema7
+                        and current_close > current_open
                         and current_close > current_ema7
                     )
                     if rsi_fast_val >= 80.0:
@@ -530,12 +535,14 @@ class LiveEngine:
                     elif not ribbon_ok:
                         self.log.info(
                             "⏳ RIBBON: BUY deferred "
-                            "(EMA7=%.2f, EMA20=%.2f, close=%.2f, "
-                            "dist=%.2f, ATR=%.2f)",
+                            "(EMA7=%.2f, EMA20=%.2f, gap=%.2f, "
+                            "low=%.2f, close=%.2f, open=%.2f, ATR=%.2f)",
                             current_ema7,
                             current_ema20,
+                            ribbon_gap,
+                            current_low,
                             current_close,
-                            dist_from_ema7,
+                            current_open,
                             self._current_atr,
                         )
                         actual_action = ACTION_HOLD
@@ -543,7 +550,9 @@ class LiveEngine:
                 elif actual_action == ACTION_SELL and regime == Regime.TRENDING_DOWN:
                     ribbon_ok = (
                         current_ema7 < current_ema20
-                        and dist_from_ema7 <= 0.8 * self._current_atr
+                        and ribbon_gap >= 0.3 * self._current_atr
+                        and current_high >= current_ema7
+                        and current_close < current_open
                         and current_close < current_ema7
                     )
                     if rsi_fast_val <= 20.0:
@@ -555,12 +564,14 @@ class LiveEngine:
                     elif not ribbon_ok:
                         self.log.info(
                             "⏳ RIBBON: SELL deferred "
-                            "(EMA7=%.2f, EMA20=%.2f, close=%.2f, "
-                            "dist=%.2f, ATR=%.2f)",
+                            "(EMA7=%.2f, EMA20=%.2f, gap=%.2f, "
+                            "high=%.2f, close=%.2f, open=%.2f, ATR=%.2f)",
                             current_ema7,
                             current_ema20,
+                            ribbon_gap,
+                            current_high,
                             current_close,
-                            dist_from_ema7,
+                            current_open,
                             self._current_atr,
                         )
                         actual_action = ACTION_HOLD
