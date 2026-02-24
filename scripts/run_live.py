@@ -26,6 +26,10 @@ V3.0 — The 4D Paradigm:
   14. Smart Phantom Spoofer — dual-trigger: Phantom Sweep + Momentum Bounce
   15. Risk-Free Pyramiding — 2nd position only when 1st at break-even (zero risk)
 
+V3.5 — The 5th Dimension Patch:
+  16. Grace Period Shield — protect trades <180s from regime shift whiplash
+  17. Volume-Kinetic Resonance — tick volume acceleration gate on Phantom Spoofer triggers
+
 Usage:
     python -m scripts.run_live [--timeframe M5] [--symbol XAUUSDm]
 """
@@ -75,12 +79,14 @@ from config import (
     PARTIAL_CLOSE_ACTIVATION_ATR,
     PARTIAL_CLOSE_VOLUME_PCT,
     PHANTOM_SWEEP_ATR,
+    REGIME_SHIFT_GRACE_SEC,
     SYMBOL,
     TIMEFRAME_NAME,
     TRADE_LIFESPAN_SEC,
     TRAILING_ACTIVATION_ATR,
     TRAILING_DRAWDOWN_ATR,
     TRAINING_LOG_DIR,
+    VOLUME_ACCEL_MULTIPLIER,
     Regime,
 )
 from core.execution_engine import ExecutionEngine
@@ -272,6 +278,9 @@ class LiveEngine:
         # V3.0 — Tick history for velocity measurement
         self._tick_history: list[tuple[float, float]] = []  # [(timestamp, price), ...]
 
+        # V3.5 — Average tick volume (rolling 50-bar baseline for VKR gate)
+        self._avg_tick_volume: float = 0.0
+
         # News filter
         self.news_filter: NewsFilter | None = None
         if NEWS_FILTER_ENABLED:
@@ -455,6 +464,14 @@ class LiveEngine:
             # 3. Compute & store ATR (used by trailing stop + dispatch)
             hl_range = (ohlcv["High"] - ohlcv["Low"]).rolling(ATR_PERIOD).mean()
             self._current_atr = float(hl_range.iloc[-1]) if not hl_range.empty else 0.0
+
+            # 3d. Compute average tick volume (50-bar rolling, V3.5 VKR baseline)
+            if "Tick_Volume" in ohlcv.columns and len(ohlcv) >= 50:
+                self._avg_tick_volume = float(
+                    ohlcv["Tick_Volume"].iloc[-50:].mean()
+                )
+            elif "Tick_Volume" in ohlcv.columns and len(ohlcv) > 0:
+                self._avg_tick_volume = float(ohlcv["Tick_Volume"].mean())
 
             # 3c. Cache EMA7 for ribbon filter + elastic cooldown
             if len(ohlcv) >= 7:
@@ -651,6 +668,7 @@ class LiveEngine:
                             "target_price": current_ema7,
                             "timestamp": time.time(),
                             "atr": self._current_atr,
+                            "init_tick_vol": self._get_current_tick_volume(),
                         }
                         self._radar_active = True  # V2.17: keep radar spinning
                         actual_action = ACTION_HOLD
@@ -686,11 +704,12 @@ class LiveEngine:
                             "target_price": current_ema7,
                             "timestamp": time.time(),
                             "atr": self._current_atr,
+                            "init_tick_vol": self._get_current_tick_volume(),
                         }
                         self._radar_active = True  # V2.17: keep radar spinning
                         actual_action = ACTION_HOLD
 
-            # 12e. Elastic Cooldown Reload — step-trend re-entry gate (V2.14)
+            # 12e. Elastic Cooldown Reload
             #   Requires: (1) swing extension > 0.5×ATR from EMA7, then
             #             (2) pullback to < 0.2×ATR from EMA7
             if (
@@ -878,6 +897,23 @@ class LiveEngine:
         if not fired:
             return False
 
+        # ── V3.5: Volume-Kinetic Resonance Gate ──
+        # Don't fire unless tick volume confirms real money flow.
+        # Fake sweeps/bounces have price movement but no volume.
+        if self._avg_tick_volume > 0:
+            current_tick_vol = self._get_current_tick_volume()
+            if current_tick_vol < self._avg_tick_volume * VOLUME_ACCEL_MULTIPLIER:
+                self.log.info(
+                    "📊 VKR GATE: %s blocked — tick_vol=%d < %.0f "
+                    "(avg=%.0f × %.1f) — fake bounce",
+                    trigger_name,
+                    current_tick_vol,
+                    self._avg_tick_volume * VOLUME_ACCEL_MULTIPLIER,
+                    self._avg_tick_volume,
+                    VOLUME_ACCEL_MULTIPLIER,
+                )
+                return False
+
         # ── FIRE ──
         action_name = "BUY" if is_buy else "SELL"
         self.log.info(
@@ -1040,6 +1076,7 @@ class LiveEngine:
                         "target_price": current_ema7,
                         "timestamp": time.time(),
                         "atr": self._current_atr,
+                        "init_tick_vol": self._get_current_tick_volume(),
                     }
                     self.log.info(
                         "🔄 RADAR CACHE: BUY "
@@ -1073,6 +1110,7 @@ class LiveEngine:
                         "target_price": current_ema7,
                         "timestamp": time.time(),
                         "atr": self._current_atr,
+                        "init_tick_vol": self._get_current_tick_volume(),
                     }
                     self.log.info(
                         "🔄 RADAR CACHE: SELL "
@@ -1346,11 +1384,26 @@ class LiveEngine:
             return 0.0
         return self._tick_history[-1][1] - best_tick[1]
 
-    # ── Regime Shift  (SRS §4 — The Clean Slate) ─
+    def _get_current_tick_volume(self) -> int:
+        """Return the current (forming) bar's tick_volume from MT5.
+
+        Used by V3.5 Volume-Kinetic Resonance to confirm real money
+        flow behind price movement before firing a cached trigger.
+        """
+        rates = mt5.copy_rates_from_pos(
+            self.symbol, self.perception.timeframe, 0, 1
+        )
+        if rates is not None and len(rates) > 0:
+            return int(rates[0]["tick_volume"])
+        return 0
+
+    # ── Regime Shift  (SRS §4 — The Clean Slate + V3.5 Grace Period) ─
     def _handle_regime_shift(self, current_regime: Regime) -> None:
         """Force close all positions when regime changes.
 
         V3.0: Uses close_all_positions to handle both primary + pyramid.
+        V3.5: Grace Period Shield — trades younger than REGIME_SHIFT_GRACE_SEC
+              are shielded from regime shift closure; Time-Decay handles them.
         """
         if self._prev_regime is not None and current_regime != self._prev_regime:
             self.log.warning(
@@ -1359,6 +1412,22 @@ class LiveEngine:
                 current_regime.value,
             )
             if self.risk.has_open_trade or self._pyramid_ticket is not None:
+                # V3.5 Grace Period: shield fresh trades from regime shift
+                if self.risk.has_open_trade:
+                    trade = self.risk.open_trade
+                    elapsed = (datetime.utcnow() - trade.open_time).total_seconds()
+                    if elapsed < REGIME_SHIFT_GRACE_SEC:
+                        self.log.info(
+                            "🛡️ GRACE PERIOD: Shielding trade #%d from "
+                            "Regime Shift (age=%.0fs < %ds) — "
+                            "Time-Decay will handle exit",
+                            trade.ticket,
+                            elapsed,
+                            REGIME_SHIFT_GRACE_SEC,
+                        )
+                        self._prev_regime = current_regime
+                        return
+
                 self.log.warning("Clean Slate protocol — closing ALL positions")
                 closed = self.executor.close_all_positions("REGIME_SHIFT")
                 self.log.info("Regime shift closed %d position(s)", closed)

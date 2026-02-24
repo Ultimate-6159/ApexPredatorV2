@@ -1,6 +1,6 @@
-# 🦅 Apex Predator V3.0 — The 4D Paradigm (MoE Algorithmic Trading)
+# 🦅 Apex Predator V3.5 — The 5th Dimension (MoE Algorithmic Trading)
 
-> Institutional-grade XAUUSD trading on MetaTrader 5 powered by 4 regime-specific RL agents, 4-dimensional trade management (Price × Space × Time × Liquidity), 3-stage profit locking, and risk-free pyramiding.
+> Institutional-grade XAUUSD trading on MetaTrader 5 powered by 4 regime-specific RL agents, 5-dimensional trade management (Price × Space × Time × Liquidity × Volume), 3-stage profit locking, and risk-free pyramiding.
 
 ---
 
@@ -29,6 +29,8 @@ Apex Predator V2 solves **Catastrophic Forgetting** — the #1 failure mode of s
 | **Virtual Time-Decay** | Force close after 90s without break-even (no broker SL spam) |
 | **Smart Phantom Spoofer** | Dual-trigger: Phantom Sweep (0.3×ATR overshoot) + Momentum Bounce (velocity) |
 | **Risk-Free Pyramiding** | 2nd position only when 1st at break-even — zero additional portfolio risk |
+| **Grace Period Shield** | Protect trades <180s from regime shift whiplash (V3.5) |
+| **Volume-Kinetic Resonance** | Tick volume acceleration gate — blocks fake bounces without real money flow (V3.5) |
 | **Live Performance Dashboard** | Parses live logs → Win Rate, Profit Factor, Sharpe, Sortino, Calmar |
 
 ---
@@ -71,6 +73,10 @@ Apex Predator V2 solves **Catastrophic Forgetting** — the #1 failure mode of s
 │  ├── ⏱️ Virtual Time-Decay Shield (90s kill switch, no SL modify spam)   │
 │  ├── 👻 Smart Phantom Spoofer (sweep 0.3×ATR + bounce velocity trigger) │
 │  └── 🔥 Risk-Free Pyramiding (Wood #2 only when Wood #1 at break-even) │
+├──────────────────────────────────────────────────────────────────────────┤
+│  V3.5 — The 5th Dimension (Volume-Kinetic Resonance)                    │
+│  ├── 🛡️ Grace Period Shield (180s immunity from regime shift whiplash)   │
+│  └── 📊 Volume-Kinetic Resonance (tick_vol > 1.5× avg to fire)         │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -178,6 +184,8 @@ Each agent is a PPO model trained in a custom Gymnasium environment with regime-
 | **Time-Decay Shield** | 90 seconds | Force close if not break-even after 90s (virtual SL) |
 | **Phantom Spoofer** | 0.3×ATR sweep | Dual-trigger: sweep overshoot + momentum bounce velocity |
 | **Risk-Free Pyramiding** | Break-even gate | 2nd position only when 1st at break-even (max 2 total) |
+| **Grace Period Shield** | 180 seconds | Shield fresh trades from regime shift whiplash (V3.5) |
+| **Volume-Kinetic Resonance** | 1.5× avg tick_vol | Block Phantom Spoofer triggers without volume confirmation (V3.5) |
 
 ---
 
@@ -257,6 +265,50 @@ Portfolio Risk = Same as a single trade (Wood #1 is free)
 
 ---
 
+## 🌌 V3.5 — The 5th Dimension Patch
+
+V3.5 adds two surgical fixes identified from live trading log analysis to eliminate spread bleed and regime shift whiplash:
+
+### Dimension 5a: Grace Period Shield
+
+Prevents regime shift from killing trades that just opened. A trade younger than 180 seconds is immune to the Clean Slate protocol — its own Time-Decay Shield (90s) handles the exit instead.
+
+```
+Trade Opens ───── 5s later: Regime Shift detected!
+                   └── Age=5s < 180s → SHIELDED ✔️
+                       (Time-Decay will close at 90s if needed)
+
+Trade Opens ───── 200s later: Regime Shift detected!
+                   └── Age=200s > 180s → Clean Slate closes it ✔️
+```
+
+### Dimension 5b: Volume-Kinetic Resonance (VKR)
+
+Adds a volume confirmation gate to the Phantom Spoofer triggers. Price can be manipulated (fake sweeps, fake bounces) but volume cannot be faked — real institutional flow always leaves a volume footprint.
+
+| Gate | Condition | Purpose |
+|---|---|---|
+| 📊 **VKR Gate** | Current bar tick_volume > 1.5× rolling 50-bar average | Confirms real money flow behind the trigger |
+
+```
+Phantom Sweep detected + Price returns to target
+  └── tick_volume = 1200 vs avg = 600
+      └── 1200 > 600 × 1.5 = 900 → VOLUME CONFIRMED → FIRE! ✔️
+
+Momentum Bounce detected + Velocity OK
+  └── tick_volume = 400 vs avg = 600
+      └── 400 < 600 × 1.5 = 900 → FAKE BOUNCE → BLOCKED ❌
+```
+
+**Config:**
+
+| Parameter | Default | Description |
+|---|---|---|
+| `REGIME_SHIFT_GRACE_SEC` | `180` | Seconds of immunity for fresh trades |
+| `VOLUME_ACCEL_MULTIPLIER` | `1.5` | Tick volume must exceed multiplier × avg to fire |
+
+---
+
 ## 📰 News Filter (`core/news_filter.py`)
 
 Fetches the Forex Factory economic calendar (weekly JSON endpoint) and detects imminent high-impact events.
@@ -316,7 +368,7 @@ Intra-bar (V2.15 — 50 ms HFT polling when active):
 •  Virtual Time-Decay: force close after 90s without break-even (V3.0)
 •  Tick Recording: price history for velocity measurement (V3.0)
 •  HFT Re-entry: intra-bar close → force AI re-evaluation instantly
-•  Phantom Spoofer: dual-trigger (Sweep 0.3×ATR + Bounce velocity) (V3.0)
+•  Phantom Spoofer: dual-trigger (Sweep 0.3×ATR + Bounce velocity) + VKR gate (V3.5)
 •  Elastic Cooldown: swing tracking (|tick − EMA7| > 0.5×ATR)
 •  Infinite Radar (V2.17): cache expired → re-predict mid-candle → new cache
    Throttle: max 1 re-prediction per 10 s.  Radar stays active until bar close
