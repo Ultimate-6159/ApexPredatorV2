@@ -91,9 +91,13 @@ _PHANTOM_FIRE_RE = re.compile(r"(PHANTOM_SWEEP|MOMENTUM_BOUNCE) FIRE: (\w+)")
 _PYRAMID_RE = re.compile(r"RISK-FREE PYRAMIDING:")
 _BREAK_EVEN_RE = re.compile(r"BREAK-EVEN ACTIVATED for Ticket #(\d+)")
 _PARTIAL_CLOSE_RE = re.compile(r"PARTIAL CLOSE:")
-_TIME_DECAY_RE = re.compile(r"TIME-DECAY SHIELD: Trade #(\d+)")
+_TIME_DECAY_RE = re.compile(r"TIME-DECAY (SHIELD|SQUEEZE): Trade #(\d+)")
 _SPREAD_GATE_RE = re.compile(r"SPREAD GATE:")
 _COOLDOWN_RE = re.compile(r"COOLDOWN: Waiting for next bar")
+
+# V4.0 defense system patterns
+_PENALTY_BOX_RE = re.compile(r"PENALTY BOX: (\w+) (locked|blocked)")
+_VOLUME_GATE_RE = re.compile(r"VOLUME GATE: (\w+) rejected")
 
 
 # ══════════════════════════════════════════════
@@ -143,6 +147,10 @@ class DashboardData:
     time_decay_count: int = 0
     spread_gate_count: int = 0
     cooldown_count: int = 0
+    # V4.0 defense systems
+    penalty_box_count: int = 0
+    volume_gate_count: int = 0
+    time_decay_squeeze_count: int = 0
 
 
 # ══
@@ -383,14 +391,25 @@ def parse_logs(log_files: Sequence[Path]) -> DashboardData:
                 if _PARTIAL_CLOSE_RE.search(msg):
                     data.partial_close_count += 1
                     continue
-                if _TIME_DECAY_RE.search(msg):
+                m = _TIME_DECAY_RE.search(msg)
+                if m:
                     data.time_decay_count += 1
+                    if m.group(1) == "SQUEEZE":
+                        data.time_decay_squeeze_count += 1
                     continue
                 if _SPREAD_GATE_RE.search(msg):
                     data.spread_gate_count += 1
                     continue
                 if _COOLDOWN_RE.search(msg):
                     data.cooldown_count += 1
+                    continue
+
+                # ── V4.0 defense systems ──
+                if _PENALTY_BOX_RE.search(msg):
+                    data.penalty_box_count += 1
+                    continue
+                if _VOLUME_GATE_RE.search(msg):
+                    data.volume_gate_count += 1
                     continue
 
     return data
@@ -562,7 +581,7 @@ def display_dashboard(data: DashboardData) -> None:
     exp = _expectancy(trades)
 
     # ── Header ──
-    _header("APEX PREDATOR V3.5 — LIVE PERFORMANCE DASHBOARD")
+    _header("APEX PREDATOR V4.0 — LIVE PERFORMANCE DASHBOARD")
 
     if data.balance_series:
         first_ts = data.balance_series[0][0].strftime("%Y-%m-%d %H:%M")
@@ -742,19 +761,23 @@ def display_dashboard(data: DashboardData) -> None:
         + data.phantom_fire_count + data.pyramid_count
         + data.time_decay_count + data.vkr_gate_count
         + data.grace_period_count + data.spread_gate_count
-        + data.cooldown_count
+        + data.cooldown_count + data.penalty_box_count
+        + data.volume_gate_count
     )
     if v3_total > 0:
-        _section("V3.x DEFENSE SYSTEMS")
+        _section("V3.x / V4.0 DEFENSE SYSTEMS")
         _kv("Break-Even Activations", f"{data.break_even_count}")
         _kv("Partial Closes (50%)", f"{data.partial_close_count}")
         _kv("Phantom Spoofer Fires", f"{data.phantom_fire_count}")
         _kv("Pyramid Positions", f"{data.pyramid_count}")
-        _kv("Time-Decay Force Closes", f"{data.time_decay_count}")
+        _kv("Time-Decay (total)", f"{data.time_decay_count}")
+        _kv("  └─ SL Squeeze (V4.0)", f"{data.time_decay_squeeze_count}")
         _kv("VKR Gate Blocks", f"{data.vkr_gate_count}")
         _kv("Grace Period Shields", f"{data.grace_period_count}")
         _kv("Spread Gate Skips", f"{data.spread_gate_count}")
         _kv("Bar Cooldown Blocks", f"{data.cooldown_count}")
+        _kv("Penalty Box Lockouts", f"{data.penalty_box_count}")
+        _kv("Volume Gate Rejects", f"{data.volume_gate_count}")
 
     # ── Recent Trades (last 10) ──
     if trades:

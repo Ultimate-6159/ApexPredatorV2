@@ -67,6 +67,7 @@ from config import (
     ENABLE_PARTIAL_CLOSE,
     ENABLE_PYRAMIDING,
     MAGIC_NUMBER,
+    MAX_CONSECUTIVE_LOSSES_DIR,
     MAX_POSITIONS,
     MODEL_DIR,
     MOMENTUM_BOUNCE_ATR,
@@ -78,9 +79,11 @@ from config import (
     OBS_CLIP_RANGE,
     PARTIAL_CLOSE_ACTIVATION_ATR,
     PARTIAL_CLOSE_VOLUME_PCT,
+    PENALTY_BOX_MINUTES,
     PHANTOM_SWEEP_ATR,
     REGIME_SHIFT_GRACE_SEC,
     SYMBOL,
+    TIME_DECAY_SL_BUMP_RATIO,
     TIMEFRAME_NAME,
     TRADE_LIFESPAN_NORMAL_SEC,
     TRADE_LIFESPAN_VOLATILE_SEC,
@@ -88,6 +91,8 @@ from config import (
     TRAILING_DRAWDOWN_ATR,
     TRAINING_LOG_DIR,
     VOLUME_ACCEL_MULTIPLIER,
+    VOLUME_SMA_PERIOD,
+    VOLUME_SPIKE_MULTIPLIER,
     Regime,
 )
 from core.execution_engine import ExecutionEngine
@@ -288,6 +293,13 @@ class LiveEngine:
         # V3.7 — Anti-Machine Gun Cooldown (bar-level)
         self._last_trade_closed_bar_time: int = 0
 
+        # V4.0 — Penalty Box (directional consecutive loss lockout)
+        self._loss_streak: dict[str, int] = {"BUY": 0, "SELL": 0}
+        self._penalty_box_until: dict[str, float] = {"BUY": 0.0, "SELL": 0.0}
+
+        # V4.0 — Time-Decay SL squeeze flag (prevent repeated modifications)
+        self._time_decay_squeezed: bool = False
+
         # News filter
         self.news_filter: NewsFilter | None = None
         if NEWS_FILTER_ENABLED:
@@ -472,10 +484,10 @@ class LiveEngine:
             hl_range = (ohlcv["High"] - ohlcv["Low"]).rolling(ATR_PERIOD).mean()
             self._current_atr = float(hl_range.iloc[-1]) if not hl_range.empty else 0.0
 
-            # 3d. Compute average tick volume (50-bar rolling, V3.5 VKR baseline)
-            if "Volume" in ohlcv.columns and len(ohlcv) >= 50:
+            # 3d. Compute average tick volume (V4.0: configurable period, default 10-bar)
+            if "Volume" in ohlcv.columns and len(ohlcv) >= VOLUME_SMA_PERIOD:
                 self._avg_tick_volume = float(
-                    ohlcv["Volume"].iloc[-50:].mean()
+                    ohlcv["Volume"].iloc[-VOLUME_SMA_PERIOD:].mean()
                 )
             elif "Volume" in ohlcv.columns and len(ohlcv) > 0:
                 self._avg_tick_volume = float(ohlcv["Volume"].mean())
@@ -787,10 +799,13 @@ class LiveEngine:
 
         V3.0: Also closes pyramid position if primary is being closed
         (primary gone → pyramid should go too for safety).
+        V4.0: Tracks directional consecutive losses for Penalty Box.
         """
         trade = self.risk.open_trade
         if trade is None:
             return False
+
+        direction = trade.direction
 
         # V3.0: If primary is closing, also close pyramid
         if self._pyramid_ticket is not None:
@@ -803,13 +818,43 @@ class LiveEngine:
             self._pyramid_ticket = None
             self._swing_extended = False
             self._last_trade_closed_bar_time = self._last_bar_time  # V3.7
+            self._time_decay_squeezed = False  # V4.0: reset
             return True
 
         result = self.executor.close_open_trade(reason)
         if result:
             self._swing_extended = False  # Reset for Elastic Cooldown
             self._last_trade_closed_bar_time = self._last_bar_time  # V3.7
+            self._time_decay_squeezed = False  # V4.0: reset
+
+            # V4.0: Estimate PnL from last tick to update penalty box
+            tick = mt5.symbol_info_tick(self.symbol)
+            if tick is not None and trade.entry_price > 0:
+                if direction == "BUY":
+                    est_pnl = tick.bid - trade.entry_price
+                else:
+                    est_pnl = trade.entry_price - tick.ask
+                self._update_penalty_box(direction, est_pnl)
+
         return result
+
+    def _update_penalty_box(self, direction: str, pnl: float) -> None:
+        """V4.0: Track directional consecutive losses and activate penalty box."""
+        if pnl < 0:
+            self._loss_streak[direction] += 1
+            if self._loss_streak[direction] >= MAX_CONSECUTIVE_LOSSES_DIR:
+                penalty_time = time.time() + (PENALTY_BOX_MINUTES * 60)
+                self._penalty_box_until[direction] = penalty_time
+                self.log.warning(
+                    "🛑 PENALTY BOX: %s locked for %d mins "
+                    "(streak=%d consecutive losses)",
+                    direction,
+                    PENALTY_BOX_MINUTES,
+                    self._loss_streak[direction],
+                )
+        else:
+            # Win resets the streak
+            self._loss_streak[direction] = 0
 
     # ── Predictive Cache (V3.0 — Smart Phantom Spoofer) ─
     def _check_predictive_cache(self) -> bool:
@@ -1336,21 +1381,25 @@ class LiveEngine:
                 self._trailing_ticket = None
                 self._highest_profit_points = 0.0
 
-    # ── V3.0: Virtual Time-Decay Shield (V3.7: regime-aware) ─
+    # ── V3.0: Virtual Time-Decay Shield (V3.7: regime-aware, V4.0: SL squeeze) ─
     def _check_time_decay(self) -> None:
-        """Force close if trade exceeds lifespan without reaching break-even.
+        """Squeeze SL toward entry when trade exceeds lifespan without break-even.
 
         V3.7: Lifespan adapts to current market regime:
           - TRENDING_UP / TRENDING_DOWN   → TRADE_LIFESPAN_NORMAL_SEC  (90 s)
           - HIGH_VOLATILITY / MEAN_REVERTING → TRADE_LIFESPAN_VOLATILE_SEC (300 s)
 
-        Virtual SL — computed in Python, fires market close.
-        No SL modification spam to broker.
+        V4.0: Instead of force-closing (wastes spread), squeeze SL closer
+        to entry by TIME_DECAY_SL_BUMP_RATIO (50%) of the remaining
+        distance.  This gives the trade a last chance while capping risk.
+        Only fires once per trade (_time_decay_squeezed flag).
         """
         if not self.risk.has_open_trade:
             return
         if self._break_even_done:
             return  # Trade is safe (break-even reached) — no time pressure
+        if self._time_decay_squeezed:
+            return  # V4.0: Already squeezed this trade — don't spam broker
 
         trade = self.risk.open_trade
         elapsed = (datetime.utcnow() - trade.open_time).total_seconds()
@@ -1363,15 +1412,40 @@ class LiveEngine:
             lifespan = TRADE_LIFESPAN_NORMAL_SEC
 
         if elapsed > lifespan:
+            # V4.0: Squeeze SL instead of force close
+            current_sl = float(trade.sl)
+            entry = float(trade.entry_price)
+
+            if trade.direction == "BUY":
+                # SL is below entry; move it up toward entry
+                new_sl = current_sl + (
+                    (entry - current_sl) * TIME_DECAY_SL_BUMP_RATIO
+                )
+            else:
+                # SL is above entry; move it down toward entry
+                new_sl = current_sl - (
+                    (current_sl - entry) * TIME_DECAY_SL_BUMP_RATIO
+                )
+
+            # Round to broker precision
+            sym_info = self.perception.get_symbol_info()
+            _point = sym_info["point"]
+            if _point > 0:
+                new_sl = round(new_sl / _point) * _point
+
             self.log.warning(
-                "⏱️ TIME-DECAY SHIELD: Trade #%d open %.0fs > %ds "
-                "(%s) without break-even — FORCE CLOSE",
+                "⏱️ TIME-DECAY SQUEEZE: Trade #%d open %.0fs > %ds "
+                "(%s) — squeezing SL %.5f → %.5f (ratio=%.0f%%)",
                 trade.ticket,
                 elapsed,
                 lifespan,
                 regime.value,
+                current_sl,
+                new_sl,
+                TIME_DECAY_SL_BUMP_RATIO * 100,
             )
-            self._close_and_track("TIME_DECAY")
+            self.executor.modify_sl(new_sl)
+            self._time_decay_squeezed = True
 
     # ── V3.0: Tick Recording & Velocity ───────────
     def _record_tick(self, price: float) -> None:
@@ -1559,6 +1633,31 @@ class LiveEngine:
             )
             return
 
+        # V4.0: Penalty Box — block direction that lost consecutively
+        if time.time() < self._penalty_box_until.get(direction, 0.0):
+            remaining = self._penalty_box_until[direction] - time.time()
+            self.log.info(
+                "🚧 PENALTY BOX: %s blocked (%.0fs remaining)",
+                direction,
+                remaining,
+            )
+            return
+
+        # V4.0: Volume Gate — reject entries when volume is below average
+        if self._avg_tick_volume > 0:
+            current_tick_vol = self._get_current_tick_volume()
+            if current_tick_vol < self._avg_tick_volume * VOLUME_SPIKE_MULTIPLIER:
+                self.log.info(
+                    "📊 VOLUME GATE: %s rejected — tick_vol=%d < %.0f "
+                    "(avg=%.0f × %.1f) — low volume",
+                    direction,
+                    current_tick_vol,
+                    self._avg_tick_volume * VOLUME_SPIKE_MULTIPLIER,
+                    self._avg_tick_volume,
+                    VOLUME_SPIKE_MULTIPLIER,
+                )
+                return
+
         # Flat → open new position
         tick = mt5.symbol_info_tick(self.symbol)
         if tick is None:
@@ -1585,6 +1684,9 @@ class LiveEngine:
             volume_step=sym["volume_step"],
             current_bar=self._bar_count,
         )
+
+        # V4.0: Reset squeeze flag for new trade
+        self._time_decay_squeezed = False
 
     # ── Position Sync  (detect TP/SL hits by broker) ─
     def _sync_position_state(self) -> None:
@@ -1630,6 +1732,9 @@ class LiveEngine:
                 # Elastic Cooldown: reset swing tracking for next entry
                 self._swing_extended = False
                 self._last_trade_closed_bar_time = self._last_bar_time  # V3.7
+                self._time_decay_squeezed = False  # V4.0: reset
+                # V4.0: Penalty Box tracking for broker-closed trades
+                self._update_penalty_box(trade.direction, profit)
 
         # --- V3.0: Pyramid ticket sync ---
         if self._pyramid_ticket is not None:
