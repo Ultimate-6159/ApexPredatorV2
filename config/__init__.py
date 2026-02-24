@@ -101,6 +101,18 @@ ENABLE_PARTIAL_CLOSE: bool = True
 PARTIAL_CLOSE_ACTIVATION_ATR: float = 1.0  # Close 50% when profit >= 1.0 × ATR
 PARTIAL_CLOSE_VOLUME_PCT: float = 0.5      # Fraction of lot to close (0.5 = 50%)
 
+# V3.0 — Virtual Time-Decay Shield
+TRADE_LIFESPAN_SEC: int = 90             # Force close if not break-even after this many seconds
+
+# V3.0 — Risk-Free Pyramiding
+ENABLE_PYRAMIDING: bool = True           # Allow 2nd position when 1st is at break-even
+MAX_POSITIONS: int = 2                   # Maximum concurrent positions per symbol
+
+# V3.0 — Phantom Spoofer Thresholds
+PHANTOM_SWEEP_ATR: float = 0.3          # Overshoot distance to detect SL sweep
+MOMENTUM_BOUNCE_ATR: float = 0.2        # Velocity threshold (ATR in 3 s) for bounce trigger
+MOMENTUM_WINDOW_SEC: float = 3.0        # Time window for velocity measurement
+
 # Inference Safety Guards
 OBS_CLIP_RANGE: float = 10.0             # Hard clip Z-Score features to ± this value
 CONFIDENCE_GATE_PCT: float = 65.0        # Force HOLD if AI confidence < this % (lowered for high-freq)

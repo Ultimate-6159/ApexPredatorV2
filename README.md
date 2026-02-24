@@ -1,6 +1,6 @@
-# 🦅 Apex Predator V2 — Mixture of Experts (MoE) Algorithmic Trading System
+# 🦅 Apex Predator V3.0 — The 4D Paradigm (MoE Algorithmic Trading)
 
-> Institutional-grade XAUUSD trading on MetaTrader 5 powered by 4 regime-specific Reinforcement Learning agents, 3-stage profit locking, ATR-adaptive risk management, and a Forex Factory news filter.
+> Institutional-grade XAUUSD trading on MetaTrader 5 powered by 4 regime-specific RL agents, 4-dimensional trade management (Price × Space × Time × Liquidity), 3-stage profit locking, and risk-free pyramiding.
 
 ---
 
@@ -26,6 +26,9 @@ Apex Predator V2 solves **Catastrophic Forgetting** — the #1 failure mode of s
 | **Infinite Radar** | Cache expired → re-predict mid-candle → new cache (never blind intra-bar) |
 | **Stealth Execution** | 15-point pre-fire buffer + 35pt deviation (latency compensation) |
 | **Elastic Cooldown** | Step-trend reload: swing extension > 0.5×ATR + pullback < 0.2×ATR |
+| **Virtual Time-Decay** | Force close after 90s without break-even (no broker SL spam) |
+| **Smart Phantom Spoofer** | Dual-trigger: Phantom Sweep (0.3×ATR overshoot) + Momentum Bounce (velocity) |
+| **Risk-Free Pyramiding** | 2nd position only when 1st at break-even — zero additional portfolio risk |
 | **Live Performance Dashboard** | Parses live logs → Win Rate, Profit Factor, Sharpe, Sortino, Calmar |
 
 ---
@@ -61,7 +64,13 @@ Apex Predator V2 solves **Catastrophic Forgetting** — the #1 failure mode of s
 │      ├── Dynamic filling mode detection (IOC/FOK/RETURN)                │
 │      ├── Error 10013 auto-retry with alternative filling modes           │
 │      ├── Live position sync before close (accurate volume/ticket)        │
-│      └── Anti-Martingale: max 1 position at any time                    │
+│      ├── Risk-Free Pyramiding: open_pyramid_position() (V3.0)           │
+│      └── Bulk close: close_all_positions() for regime shift/shutdown    │
+├──────────────────────────────────────────────────────────────────────────┤
+│  V3.0 — The 4D Paradigm (Time + Liquidity Dimensions)                   │
+│  ├── ⏱️ Virtual Time-Decay Shield (90s kill switch, no SL modify spam)   │
+│  ├── 👻 Smart Phantom Spoofer (sweep 0.3×ATR + bounce velocity trigger) │
+│  └── 🔥 Risk-Free Pyramiding (Wood #2 only when Wood #1 at break-even) │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -137,6 +146,7 @@ Each agent is a PPO model trained in a custom Gymnasium environment with regime-
 - **Error 10013 Retry:** If order fails → cycles through IOC/FOK/RETURN automatically
 - **Position Sync:** Before close → queries live MT5 position for real `volume` + `ticket`
 - **Operations:** `execute_action()`, `close_open_trade()`, `modify_sl()`, `partial_close()`
+- **V3.0:** `open_pyramid_position()` (fire-and-forget, no risk_manager), `close_all_positions(reason)` (bulk close all MAGIC positions)
 
 ---
 
@@ -165,6 +175,9 @@ Each agent is a PPO model trained in a custom Gymnasium environment with regime-
 | **Infinite Radar** | 10s re-predict | Cache expired → re-run AI mid-candle → new cache (V2.17) |
 | **Stealth Trigger** | 15-point buffer | Fire 15pts before target (latency compensation) |
 | **Elastic Cooldown** | Swing + Pullback | Swing >0.5×ATR then pullback <0.2×ATR for re-entry |
+| **Time-Decay Shield** | 90 seconds | Force close if not break-even after 90s (virtual SL) |
+| **Phantom Spoofer** | 0.3×ATR sweep | Dual-trigger: sweep overshoot + momentum bounce velocity |
+| **Risk-Free Pyramiding** | Break-even gate | 2nd position only when 1st at break-even (max 2 total) |
 
 ---
 
@@ -197,6 +210,50 @@ Entry ─────── 0.5×ATR ──────── 1.0×ATR ───
 | `PARTIAL_CLOSE_VOLUME_PCT` | `0.5` | Fraction of lot to close (50%) |
 | `TRAILING_ACTIVATION_ATR` | `0.8` | ATR multiplier to activate trailing |
 | `TRAILING_DRAWDOWN_ATR` | `0.4` | ATR multiplier for max retrace |
+
+---
+
+## ⏱️ V3.0 — The 4D Paradigm
+
+V3.0 adds three new dimensions to trade management beyond the original Price (AI entry) and Space (ATR SL/TP):
+
+### Dimension 3: Time — Virtual Time-Decay Shield
+
+Trades that fail to reach break-even within 90 seconds are force-closed via market order. The SL is computed **in Python** (virtual) — no `TRADE_ACTION_SLTP` spam to the broker. The broker only sees "open" and "close".
+
+```
+Trade Opens ────── 90s elapsed ──────── Break-Even NOT reached?
+                                         → FORCE MARKET CLOSE
+                                         "We don't play the hope game"
+```
+
+### Dimension 4: Liquidity — Smart Phantom Spoofer (Dual-Trigger)
+
+Upgraded predictive cache with two independent fire triggers:
+
+| Trigger | Condition | Purpose |
+|---|---|---|
+| 👻 **Phantom Sweep** | Price overshoots target by 0.3×ATR (sweep), then returns within 0.2×ATR | Catches the post-sweep reversal |
+| 🏎️ **Momentum Bounce** | Price near target (0.5×ATR) + velocity > 0.2×ATR in 3s | Prevents missing strong trends |
+
+Either trigger fires the order. Tick velocity is computed from a 10-second rolling tick history recorded every 50ms.
+
+### Risk-Free Pyramiding (Wood #2)
+
+When the primary position reaches break-even (SL moved to entry), a 2nd position can be opened in the same direction:
+
+```
+Wood #1: BUY @ 2000  SL→2000 (break-even) → Risk = $0
+Wood #2: BUY @ 2005  SL=1995            → Risk = normal
+Portfolio Risk = Same as a single trade (Wood #1 is free)
+```
+
+**Safety Gates:**
+- `ENABLE_PYRAMIDING = True` must be on
+- `_break_even_done = True` (primary is risk-free)
+- `_pyramid_ticket is None` (no existing pyramid)
+- MT5 position count < `MAX_POSITIONS` (2)
+- If primary closes → pyramid closes too (`close_all_positions`)
 
 ---
 
@@ -256,8 +313,10 @@ The `LiveEngine` fires once per bar close and executes a **15-step pipeline**:
 
 Intra-bar (V2.15 — 50 ms HFT polling when active):
 •  Tick-level Risk: Sync + Break-Even + Trailing every 50 ms
+•  Virtual Time-Decay: force close after 90s without break-even (V3.0)
+•  Tick Recording: price history for velocity measurement (V3.0)
 •  HFT Re-entry: intra-bar close → force AI re-evaluation instantly
-•  Predictive Cache: zone/velocity/time gates → stealth fire
+•  Phantom Spoofer: dual-trigger (Sweep 0.3×ATR + Bounce velocity) (V3.0)
 •  Elastic Cooldown: swing tracking (|tick − EMA7| > 0.5×ATR)
 •  Infinite Radar (V2.17): cache expired → re-predict mid-candle → new cache
    Throttle: max 1 re-prediction per 10 s.  Radar stays active until bar close
@@ -271,10 +330,10 @@ Intra-bar (V2.15 — 50 ms HFT polling when active):
 | Flat (no position) | HOLD | Do nothing (wait) |
 | In position | HOLD | Maintain position (V2.18 — let TP/SL/Trailing close it) |
 | Flat | BUY or SELL | Open new position |
-| In BUY position | BUY | PASS (Anti-Martingale) |
-| In BUY position | SELL | Close BUY (don't reopen this bar) |
-| In SELL position | SELL | PASS (Anti-Martingale) |
-| In SELL position | BUY | Close SELL (don't reopen this bar) |
+| In BUY position | BUY | Risk-Free Pyramid (V3.0) if break-even done, else PASS |
+| In BUY position | SELL | Close BUY + pyramid (don't reopen this bar) |
+| In SELL position | SELL | Risk-Free Pyramid (V3.0) if break-even done, else PASS |
+| In SELL position | BUY | Close SELL + pyramid (don't reopen this bar) |
 
 ### Additional Features
 
@@ -518,6 +577,17 @@ python -m scripts.analyze_live_logs --csv trades.csv
 | `TRAILING_ACTIVATION_ATR` | `0.8` | Trailing activates at 0.8 × ATR profit |
 | `TRAILING_DRAWDOWN_ATR` | `0.4` | Trailing closes on 0.4 × ATR retrace |
 
+### V3.0 — The 4D Paradigm
+
+| Parameter | Default | Description |
+|---|---|---|
+| `TRADE_LIFESPAN_SEC` | `90` | Force close if not break-even after N seconds |
+| `ENABLE_PYRAMIDING` | `True` | Allow 2nd position when 1st at break-even |
+| `MAX_POSITIONS` | `2` | Max concurrent positions per symbol |
+| `PHANTOM_SWEEP_ATR` | `0.3` | Overshoot distance to detect SL sweep |
+| `MOMENTUM_BOUNCE_ATR` | `0.2` | Velocity threshold (ATR in 3s) for bounce trigger |
+| `MOMENTUM_WINDOW_SEC` | `3.0` | Time window for velocity measurement |
+
 ### Inference Safety Guards
 
 | Parameter | Default | Description |
@@ -566,7 +636,7 @@ logs/training/{regime_lower}/{session_id}/
 3. **Credentials via `os.getenv()`** — Never hardcode secrets
 4. **Type hints everywhere** — `from __future__ import annotations` in every file
 5. **All loggers → `"apex_live"`** — Unified log routing for live engine
-6. **One position max** — Anti-Martingale enforced at execution layer
+6. **Max 2 positions** — Anti-Martingale enforced; 2nd only when 1st at break-even (V3.0)
 7. **Clip before predict** — Data sanitization must happen before model inference
 8. **Dynamic filling** — Never hardcode `ORDER_FILLING_IOC`; always auto-detect
 

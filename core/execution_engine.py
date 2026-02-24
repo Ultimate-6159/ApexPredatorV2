@@ -338,3 +338,144 @@ class ExecutionEngine:
             remaining,
         )
         return True
+
+    # ── V3.0: Pyramid Position (fire-and-forget) ─────
+    def open_pyramid_position(
+        self,
+        direction: str,
+        regime: Regime,
+        price_bid: float,
+        price_ask: float,
+        atr: float,
+        point: float,
+        equity: float,
+        tick_value: float,
+        tick_size: float,
+        volume_min: float,
+        volume_max: float,
+        volume_step: float,
+    ) -> int | None:
+        """Open a 2nd position without registering in RiskManager.
+
+        Returns the ticket number on success, or None on failure.
+        The caller (LiveEngine) tracks the pyramid ticket separately.
+        """
+        entry_price = price_bid if direction == "SELL" else price_ask
+        sl, tp = self.risk.calculate_sl_tp(direction, entry_price, atr, regime, point)
+        sl_distance = abs(entry_price - sl)
+        lot = self.risk.calculate_lot_size(
+            equity, sl_distance, tick_value, tick_size,
+            volume_min, volume_max, volume_step, point,
+        )
+
+        order_type = mt5.ORDER_TYPE_BUY if direction == "BUY" else mt5.ORDER_TYPE_SELL
+
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": self.symbol,
+            "volume": lot,
+            "type": order_type,
+            "price": entry_price,
+            "sl": sl,
+            "tp": tp,
+            "deviation": SLIPPAGE_POINTS,
+            "magic": MAGIC_NUMBER,
+            "comment": f"{ORDER_COMMENT}_PYR",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": self._get_filling_type(),
+        }
+
+        result = mt5.order_send(request)
+
+        # Retry with alternative filling modes on Invalid Request
+        if result is not None and result.retcode == 10013:
+            logger.warning("Pyramid open retcode=10013 — trying alternative filling modes")
+            for alt in [mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_RETURN]:
+                if alt == request["type_filling"]:
+                    continue
+                request["type_filling"] = alt
+                result = mt5.order_send(request)
+                if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
+                    break
+
+        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            logger.error("Pyramid order FAILED: %s", result)
+            return None
+
+        # Resolve actual ticket from broker
+        actual_ticket = result.order
+        positions = mt5.positions_get(symbol=self.symbol)
+        if positions:
+            magic_tickets = {pos.ticket for pos in positions if pos.magic == MAGIC_NUMBER}
+            # The new ticket is any MAGIC ticket that isn't the primary trade
+            primary = self.risk.open_trade
+            primary_ticket = primary.ticket if primary else None
+            for t in magic_tickets:
+                if t != primary_ticket:
+                    actual_ticket = t
+                    break
+
+        actual_price = result.price if result.price > 0 else entry_price
+        logger.info(
+            "🔥 PYRAMID FILLED: ticket=%d  %s %.2f @ %.2f  SL=%.2f TP=%.2f",
+            actual_ticket, direction, lot, actual_price, sl, tp,
+        )
+        return actual_ticket
+
+    # ── V3.0: Close ALL positions (regime shift / shutdown) ─
+    def close_all_positions(self, reason: str) -> int:
+        """Close every MAGIC_NUMBER position on this symbol. Returns count closed."""
+        positions = mt5.positions_get(symbol=self.symbol)
+        if not positions:
+            return 0
+
+        closed = 0
+        for pos in positions:
+            if pos.magic != MAGIC_NUMBER:
+                continue
+
+            tick = mt5.symbol_info_tick(self.symbol)
+            if tick is None:
+                logger.error("Cannot get tick to close position #%d", pos.ticket)
+                continue
+
+            direction = "BUY" if pos.type == mt5.ORDER_TYPE_BUY else "SELL"
+            close_price = tick.bid if direction == "BUY" else tick.ask
+            close_type = mt5.ORDER_TYPE_SELL if direction == "BUY" else mt5.ORDER_TYPE_BUY
+
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": self.symbol,
+                "volume": pos.volume,
+                "type": close_type,
+                "position": pos.ticket,
+                "price": close_price,
+                "deviation": SLIPPAGE_POINTS,
+                "magic": MAGIC_NUMBER,
+                "comment": f"{ORDER_COMMENT}_{reason}",
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": self._get_filling_type(),
+            }
+
+            result = mt5.order_send(request)
+
+            # Retry with alternative filling modes
+            if result is not None and result.retcode == 10013:
+                for alt in [mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_RETURN]:
+                    if alt == request["type_filling"]:
+                        continue
+                    request["type_filling"] = alt
+                    result = mt5.order_send(request)
+                    if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
+                        break
+
+            if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
+                logger.info(
+                    "CLOSED #%d (%s) [%s] vol=%.2f @ %.2f",
+                    pos.ticket, reason, direction, pos.volume, close_price,
+                )
+                closed += 1
+            else:
+                logger.error("Failed to close #%d (%s): %s", pos.ticket, reason, result)
+
+        return closed

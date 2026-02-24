@@ -1,5 +1,5 @@
 """
-Apex Predator V2 — Live Execution Engine
+Apex Predator V3.0 — Live Execution Engine (The 4D Paradigm)
 Real-time automated trading on MetaTrader 5 using ensemble RL agents.
 
 Architecture:
@@ -15,11 +15,16 @@ SRS Requirements Implemented:
   7. Logging & Fail-Safes — MT5 auto-reconnect, daily rotating log
 
 V3 Upgrades:
-   8. ATR-Based Dynamic Trailing Stop — adapts to volatility (narrow in ranging, wide in trending)
+   8. ATR-Based Dynamic Trailing Stop — adapts to volatility
    9. News Filter — Forex Factory calendar, forces HIGH_VOLATILITY before red events
   10. Inference Telemetry — action probabilities, critic value, anomaly detection
-  11. Infinite Radar (V2.17) — intra-bar re-prediction keeps cache alive until signal fires
-  12. HOLD Semantics Fix (V2.18) — HOLD preserves open position, exits via TP/SL/Trailing only
+  11. Infinite Radar (V2.17) — intra-bar re-prediction keeps cache alive
+  12. HOLD Semantics Fix (V2.18) — HOLD preserves open position
+
+V3.0 — The 4D Paradigm:
+  13. Virtual Time-Decay Shield — force close after 90s without break-even (no broker spam)
+  14. Smart Phantom Spoofer — dual-trigger: Phantom Sweep + Momentum Bounce
+  15. Risk-Free Pyramiding — 2nd position only when 1st at break-even (zero risk)
 
 Usage:
     python -m scripts.run_live [--timeframe M5] [--symbol XAUUSDm]
@@ -56,8 +61,12 @@ from config import (
     CONFIDENCE_GATE_PCT,
     ENABLE_BREAK_EVEN,
     ENABLE_PARTIAL_CLOSE,
+    ENABLE_PYRAMIDING,
     MAGIC_NUMBER,
+    MAX_POSITIONS,
     MODEL_DIR,
+    MOMENTUM_BOUNCE_ATR,
+    MOMENTUM_WINDOW_SEC,
     NEWS_BLACKOUT_MINUTES,
     NEWS_CACHE_HOURS,
     NEWS_CURRENCIES,
@@ -65,8 +74,10 @@ from config import (
     OBS_CLIP_RANGE,
     PARTIAL_CLOSE_ACTIVATION_ATR,
     PARTIAL_CLOSE_VOLUME_PCT,
+    PHANTOM_SWEEP_ATR,
     SYMBOL,
     TIMEFRAME_NAME,
+    TRADE_LIFESPAN_SEC,
     TRAILING_ACTIVATION_ATR,
     TRAILING_DRAWDOWN_ATR,
     TRAINING_LOG_DIR,
@@ -255,6 +266,12 @@ class LiveEngine:
         self._swing_extended: bool = True  # True at startup to allow first trade
         self._last_ema7: float = 0.0
 
+        # V3.0 — Pyramid state
+        self._pyramid_ticket: int | None = None
+
+        # V3.0 — Tick history for velocity measurement
+        self._tick_history: list[tuple[float, float]] = []  # [(timestamp, price), ...]
+
         # News filter
         self.news_filter: NewsFilter | None = None
         if NEWS_FILTER_ENABLED:
@@ -349,6 +366,12 @@ class LiveEngine:
             self._sync_position_state()
             self._check_profit_locking()
             self._check_trailing_stop()
+            self._check_time_decay()  # V3.0: Virtual Time-Decay Shield
+
+            # V3.0: Record tick for velocity measurement
+            _tick = mt5.symbol_info_tick(self.symbol)
+            if _tick is not None:
+                self._record_tick(float(_tick.bid))
 
             # HFT Re-entry: position just closed intra-bar → force AI now
             if was_open and not self.risk.has_open_trade:
@@ -731,26 +754,49 @@ class LiveEngine:
 
     # ── Close with Elastic Cooldown reset ─────
     def _close_and_track(self, reason: str) -> bool:
-        """Close trade and reset Elastic Cooldown state (V2.14)."""
+        """Close trade and reset Elastic Cooldown state (V2.14).
+
+        V3.0: Also closes pyramid position if primary is being closed
+        (primary gone → pyramid should go too for safety).
+        """
         trade = self.risk.open_trade
         if trade is None:
             return False
+
+        # V3.0: If primary is closing, also close pyramid
+        if self._pyramid_ticket is not None:
+            self.log.info(
+                "Closing pyramid #%d along with primary (%s)",
+                self._pyramid_ticket, reason,
+            )
+            self.executor.close_all_positions(reason)
+            self.risk.register_close(0.0)
+            self._pyramid_ticket = None
+            self._swing_extended = False
+            return True
 
         result = self.executor.close_open_trade(reason)
         if result:
             self._swing_extended = False  # Reset for Elastic Cooldown
         return result
 
-    # ── Predictive Cache (V2.16 — Sniper Release) ─
+    # ── Predictive Cache (V3.0 — Smart Phantom Spoofer) ─
     def _check_predictive_cache(self) -> bool:
-        """Check and potentially fire cached prediction during intra-bar monitoring.
+        """Dual-trigger sniper system for cached predictions.
 
-        Three guards before execution:
-          1. Zone:     |tick - target| < 0.5 × ATR (ambush zone)
-          2. Time:     cache age < 10 s (freshness)
-          3. Velocity: cache age >= 3 s (not a spike-through)
+        Trigger 1 — Phantom Sweep:
+          Price overshoots target by PHANTOM_SWEEP_ATR × ATR (SL sweep),
+          then returns within 0.2 × ATR of target → FIRE.
 
-        Zone trigger: fire when tick enters 0.2×ATR tolerance of target (EMA7).
+        Trigger 2 — Momentum Bounce:
+          Price is within 0.5 × ATR of target and bounces back in the
+          trade direction with velocity > MOMENTUM_BOUNCE_ATR × ATR
+          within MOMENTUM_WINDOW_SEC seconds → FIRE (prevents missing
+          strong trends).
+
+        Guards:
+          - Cache expires after 10 s
+          - Cannot fire while a position is open
         """
         if self._predictive_cache is None:
             return False
@@ -766,15 +812,12 @@ class LiveEngine:
         tick_price = float(tick.bid)
         target = cache["target_price"]
         atr = cache["atr"]
-
-        # Gate 1: price must be in the 0.5×ATR ambush zone
-        if abs(tick_price - target) > 0.5 * atr:
-            return False
+        is_buy = cache["action"] == ACTION_BUY
 
         now = time.time()
         time_elapsed = now - cache["timestamp"]
 
-        # Gate 2: cache freshness (expire after 10 s)
+        # Gate: cache freshness (expire after 10 s)
         if time_elapsed > 10.0:
             self.log.info(
                 "⏰ CACHE EXPIRED: %.1fs > 10s — discarding", time_elapsed,
@@ -782,22 +825,65 @@ class LiveEngine:
             self._predictive_cache = None
             return False
 
-        # Gate 3: velocity guard (price rushed into zone < 3 s)
-        if time_elapsed < 3.0:
-            return False  # Let time elapse naturally until ≥ 3 s
+        # ── Track Phantom Sweep state ──
+        # Signed overshoot: for BUY, sweep is price dipping BELOW target;
+        # for SELL, sweep is price spiking ABOVE target.
+        sweep_threshold = PHANTOM_SWEEP_ATR * atr
+        if is_buy:
+            overshoot = target - tick_price  # positive when price below target
+        else:
+            overshoot = tick_price - target  # positive when price above target
 
-        # Zone trigger: fire when tick penetrates 0.2×ATR tolerance of target
-        tolerance = 0.2 * atr
-        if cache["action"] == ACTION_BUY and tick_price > target + tolerance:
-            return False  # Not pulled back deep enough yet
-        if cache["action"] == ACTION_SELL and tick_price < target - tolerance:
-            return False  # Not bounced high enough yet
+        if overshoot >= sweep_threshold:
+            if not cache.get("sweep_detected"):
+                cache["sweep_detected"] = True
+                cache["sweep_peak"] = tick_price
+                self.log.info(
+                    "👻 PHANTOM SWEEP detected: tick=%.2f  target=%.2f  "
+                    "overshoot=%.2f (threshold=%.2f)",
+                    tick_price, target, overshoot, sweep_threshold,
+                )
+        # Update sweep peak (deepest overshoot)
+        if cache.get("sweep_detected"):
+            if is_buy and tick_price < cache.get("sweep_peak", tick_price):
+                cache["sweep_peak"] = tick_price
+            elif not is_buy and tick_price > cache.get("sweep_peak", tick_price):
+                cache["sweep_peak"] = tick_price
 
-        # All guards passed — FIRE
-        action_name = "BUY" if cache["action"] == ACTION_BUY else "SELL"
+        fired = False
+        trigger_name = ""
+
+        # ── Trigger 1: Phantom Sweep Return ──
+        if cache.get("sweep_detected"):
+            tolerance = 0.2 * atr
+            dist_to_target = abs(tick_price - target)
+            if dist_to_target <= tolerance:
+                fired = True
+                trigger_name = "PHANTOM_SWEEP"
+
+        # ── Trigger 2: Momentum Bounce ──
+        if not fired:
+            dist_to_target = abs(tick_price - target)
+            if dist_to_target <= 0.5 * atr and time_elapsed >= 1.0:
+                velocity = self._compute_tick_velocity(MOMENTUM_WINDOW_SEC)
+                velocity_threshold = MOMENTUM_BOUNCE_ATR * atr
+                # Velocity must be in trade direction
+                if is_buy and velocity >= velocity_threshold:
+                    fired = True
+                    trigger_name = "MOMENTUM_BOUNCE"
+                elif not is_buy and velocity <= -velocity_threshold:
+                    fired = True
+                    trigger_name = "MOMENTUM_BOUNCE"
+
+        if not fired:
+            return False
+
+        # ── FIRE ──
+        action_name = "BUY" if is_buy else "SELL"
         self.log.info(
-            "🎯 PREDICTIVE CACHE FIRE: %s at tick=%.2f "
+            "🎯 %s FIRE: %s at tick=%.2f "
             "(target=%.2f, elapsed=%.1fs, ATR=%.2f)",
+            trigger_name,
             action_name,
             tick_price,
             target,
@@ -1202,25 +1288,91 @@ class LiveEngine:
                 self._trailing_ticket = None
                 self._highest_profit_points = 0.0
 
+    # ── V3.0: Virtual Time-Decay Shield ───────────
+    def _check_time_decay(self) -> None:
+        """Force close if trade exceeds TRADE_LIFESPAN_SEC without reaching break-even.
+
+        Virtual SL — computed in Python, fires market close.
+        No SL modification spam to broker.
+        """
+        if not self.risk.has_open_trade:
+            return
+        if self._break_even_done:
+            return  # Trade is safe (break-even reached) — no time pressure
+
+        trade = self.risk.open_trade
+        elapsed = (datetime.utcnow() - trade.open_time).total_seconds()
+
+        if elapsed > TRADE_LIFESPAN_SEC:
+            self.log.warning(
+                "⏱️ TIME-DECAY SHIELD: Trade #%d open %.0fs > %ds "
+                "without break-even — FORCE CLOSE",
+                trade.ticket,
+                elapsed,
+                TRADE_LIFESPAN_SEC,
+            )
+            self._close_and_track("TIME_DECAY")
+
+    # ── V3.0: Tick Recording & Velocity ───────────
+    def _record_tick(self, price: float) -> None:
+        """Append current tick to history and prune stale entries (>10 s)."""
+        now = time.time()
+        self._tick_history.append((now, price))
+        # Keep only the last 10 seconds of ticks
+        cutoff = now - 10.0
+        self._tick_history = [
+            (t, p) for t, p in self._tick_history if t >= cutoff
+        ]
+
+    def _compute_tick_velocity(self, window_sec: float) -> float:
+        """Compute signed price movement over the last *window_sec* seconds.
+
+        Returns price_now - price_at_(now - window_sec).
+        If insufficient data, returns 0.0.
+        """
+        if len(self._tick_history) < 2:
+            return 0.0
+        now = self._tick_history[-1][0]
+        target_time = now - window_sec
+        # Find the tick closest to target_time
+        best_tick = self._tick_history[0]
+        for t, p in self._tick_history:
+            if t <= target_time:
+                best_tick = (t, p)
+            else:
+                break
+        # Need at least half the window covered
+        if now - best_tick[0] < window_sec * 0.5:
+            return 0.0
+        return self._tick_history[-1][1] - best_tick[1]
+
     # ── Regime Shift  (SRS §4 — The Clean Slate) ─
     def _handle_regime_shift(self, current_regime: Regime) -> None:
-        """Force close all positions when regime changes."""
+        """Force close all positions when regime changes.
+
+        V3.0: Uses close_all_positions to handle both primary + pyramid.
+        """
         if self._prev_regime is not None and current_regime != self._prev_regime:
             self.log.warning(
                 "REGIME SHIFT: %s → %s",
                 self._prev_regime.value,
                 current_regime.value,
             )
-            if self.risk.has_open_trade:
-                self.log.warning(
-                    "Force closing trade #%d (Clean Slate protocol)",
-                    self.risk.open_trade.ticket,
-                )
-                self._close_and_track("REGIME_SHIFT")
+            if self.risk.has_open_trade or self._pyramid_ticket is not None:
+                self.log.warning("Clean Slate protocol — closing ALL positions")
+                closed = self.executor.close_all_positions("REGIME_SHIFT")
+                self.log.info("Regime shift closed %d position(s)", closed)
+                # Sync internal state
+                if self.risk.has_open_trade:
+                    self.risk.register_close(0.0)
+                self._pyramid_ticket = None
+                self._break_even_done = False
+                self._partial_close_done = False
+                self._swing_extended = False
 
         self._prev_regime = current_regime
 
-    # ── Action Dispatch  (SRS §5 + §6) ───────
+    # ── Action Dispatch  (SRS §5 + §6 + V3.0 Pyramiding) ─
     def _dispatch_action(
         self,
         action: int,
@@ -1234,7 +1386,7 @@ class LiveEngine:
           HOLD + flat       → do nothing (wait)
           HOLD + in position→ maintain position (let TP/SL/Trailing close it)
           BUY/SELL + flat   → open new position
-          BUY/SELL + same   → PASS  (Anti-Martingale: max 1 position)
+          BUY/SELL + same   → Risk-Free Pyramid (V3.0) if break-even done, else PASS
           BUY/SELL + opposite → close existing (don't reopen this bar)
         """
         has_trade = self.risk.has_open_trade
@@ -1258,7 +1410,44 @@ class LiveEngine:
 
         if has_trade:
             if trade.direction == direction:
-                # Anti-Martingale: same direction → PASS (SRS §6)
+                # V3.0 Risk-Free Pyramiding: allow 2nd position when
+                # primary is at break-even (zero additional risk)
+                if (
+                    ENABLE_PYRAMIDING
+                    and self._break_even_done
+                    and self._pyramid_ticket is None
+                ):
+                    positions = mt5.positions_get(symbol=self.symbol)
+                    our_count = sum(
+                        1 for p in (positions or []) if p.magic == MAGIC_NUMBER
+                    )
+                    if our_count < MAX_POSITIONS:
+                        self.log.info(
+                            "🔥 RISK-FREE PYRAMIDING: Wood #1 (#%d) is safe, "
+                            "firing Wood #2!",
+                            trade.ticket,
+                        )
+                        tick = mt5.symbol_info_tick(self.symbol)
+                        if tick is not None:
+                            sym = self.perception.get_symbol_info()
+                            ticket = self.executor.open_pyramid_position(
+                                direction=direction,
+                                regime=regime,
+                                price_bid=tick.bid,
+                                price_ask=tick.ask,
+                                atr=self._current_atr,
+                                point=sym["point"],
+                                equity=equity,
+                                tick_value=sym["trade_tick_value"],
+                                tick_size=sym["trade_tick_size"],
+                                volume_min=sym["volume_min"],
+                                volume_max=sym["volume_max"],
+                                volume_step=sym["volume_step"],
+                            )
+                            if ticket is not None:
+                                self._pyramid_ticket = ticket
+                        return
+                # Anti-Martingale: same direction + no pyramid conditions → PASS
                 return
             else:
                 # Opposite direction → close only (next bar may reopen)
@@ -1299,42 +1488,56 @@ class LiveEngine:
 
     # ── Position Sync  (detect TP/SL hits by broker) ─
     def _sync_position_state(self) -> None:
-        """Detect positions closed by the broker (TP/SL hit on server)."""
-        if not self.risk.has_open_trade:
+        """Detect positions closed by the broker (TP/SL hit on server).
+
+        V3.0: Also monitors the pyramid ticket — if it disappears from
+        the broker, reset _pyramid_ticket (TP/SL hit on Wood #2).
+        """
+        if not self.risk.has_open_trade and self._pyramid_ticket is None:
             return
 
-        trade = self.risk.open_trade
         positions = mt5.positions_get(symbol=self.symbol)
-
-        our_open = False
+        magic_tickets = set()
         if positions:
             for pos in positions:
                 if pos.magic == MAGIC_NUMBER:
-                    our_open = True
-                    # Sync ticket if it drifted (e.g. after partial close)
-                    if pos.ticket != trade.ticket:
-                        self.log.info(
-                            "Position ticket synced: %d \u2192 %d",
-                            trade.ticket,
-                            pos.ticket,
-                        )
-                        self.risk.update_ticket(pos.ticket)
-                    break
+                    magic_tickets.add(pos.ticket)
 
-        if not our_open:
-            profit = self._get_closed_trade_profit(trade.ticket, trade.open_time)
-            reason = "TP/SL_HIT" if profit != 0.0 else "BROKER_CLOSE"
-            self.log.info(
-                "Trade #%d closed by broker (%s) [%s %s] — profit=%.2f",
-                trade.ticket,
-                reason,
-                trade.direction,
-                trade.regime.value,
-                profit,
-            )
-            self.risk.register_close(profit)
-            # Elastic Cooldown: reset swing tracking for next entry
-            self._swing_extended = False
+        # --- Primary trade sync ---
+        if self.risk.has_open_trade:
+            trade = self.risk.open_trade
+            if trade.ticket in magic_tickets:
+                # Sync ticket if it drifted (e.g. after partial close)
+                for pos in positions:
+                    if pos.magic == MAGIC_NUMBER and pos.ticket != trade.ticket:
+                        # Check if the original ticket is gone but another exists
+                        pass
+                    if pos.magic == MAGIC_NUMBER and pos.ticket == trade.ticket:
+                        break
+            else:
+                # Primary trade not found — closed by broker
+                profit = self._get_closed_trade_profit(trade.ticket, trade.open_time)
+                reason = "TP/SL_HIT" if profit != 0.0 else "BROKER_CLOSE"
+                self.log.info(
+                    "Trade #%d closed by broker (%s) [%s %s] — profit=%.2f",
+                    trade.ticket,
+                    reason,
+                    trade.direction,
+                    trade.regime.value,
+                    profit,
+                )
+                self.risk.register_close(profit)
+                # Elastic Cooldown: reset swing tracking for next entry
+                self._swing_extended = False
+
+        # --- V3.0: Pyramid ticket sync ---
+        if self._pyramid_ticket is not None:
+            if self._pyramid_ticket not in magic_tickets:
+                self.log.info(
+                    "🔥 Pyramid #%d closed by broker (TP/SL hit)",
+                    self._pyramid_ticket,
+                )
+                self._pyramid_ticket = None
 
     def _get_closed_trade_profit(
         self, ticket: int, open_time: datetime
@@ -1358,12 +1561,19 @@ class LiveEngine:
 
     # ── Shutdown ──────────────────────────────
     def _shutdown(self) -> None:
-        """Graceful shutdown — close open trades and disconnect."""
+        """Graceful shutdown — close ALL open trades and disconnect.
+
+        V3.0: Uses close_all_positions to handle primary + pyramid.
+        """
         self.log.info("Shutting down...")
 
-        if self.risk.has_open_trade:
-            self.log.warning("Closing open trade #%d before shutdown", self.risk.open_trade.ticket)
-            self.executor.close_open_trade("SHUTDOWN")
+        if self.risk.has_open_trade or self._pyramid_ticket is not None:
+            self.log.warning("Closing ALL positions before shutdown")
+            closed = self.executor.close_all_positions("SHUTDOWN")
+            self.log.info("Shutdown closed %d position(s)", closed)
+            if self.risk.has_open_trade:
+                self.risk.register_close(0.0)
+            self._pyramid_ticket = None
 
         self.perception.disconnect()
         self.log.info("═══ Apex Predator V2 — Live Engine Stopped ═══")
