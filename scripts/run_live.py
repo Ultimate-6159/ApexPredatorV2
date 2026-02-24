@@ -582,8 +582,6 @@ class LiveEngine:
                 _tick = mt5.symbol_info_tick(self.symbol)
                 tick_price = float(_tick.bid) if _tick is not None else float(close_series.iloc[-1])
 
-                _sym_cache = self.perception.get_symbol_info()
-
                 if actual_action == ACTION_BUY and regime == Regime.TRENDING_UP:
                     ribbon_ok = (
                         current_ema7 > current_ema20
@@ -615,7 +613,6 @@ class LiveEngine:
                             "target_price": current_ema7,
                             "timestamp": time.time(),
                             "atr": self._current_atr,
-                            "point": _sym_cache["point"],
                         }
                         actual_action = ACTION_HOLD
 
@@ -650,7 +647,6 @@ class LiveEngine:
                             "target_price": current_ema7,
                             "timestamp": time.time(),
                             "atr": self._current_atr,
-                            "point": _sym_cache["point"],
                         }
                         actual_action = ACTION_HOLD
 
@@ -728,16 +724,16 @@ class LiveEngine:
             self._swing_extended = False  # Reset for Elastic Cooldown
         return result
 
-    # ── Predictive Cache (V2.14 — Velocity-Aware) ─
+    # ── Predictive Cache (V2.16 — Sniper Release) ─
     def _check_predictive_cache(self) -> bool:
         """Check and potentially fire cached prediction during intra-bar monitoring.
 
         Three guards before execution:
-          1. Zone:     |tick - target| < 0.2 × ATR (ambush zone)
+          1. Zone:     |tick - target| < 0.5 × ATR (ambush zone)
           2. Time:     cache age < 10 s (freshness)
           3. Velocity: cache age >= 3 s (not a spike-through)
 
-        Stealth trigger: fire 15 points BEFORE exact target (latency compensation).
+        Zone trigger: fire when tick enters 0.2×ATR tolerance of target (EMA7).
         """
         if self._predictive_cache is None:
             return False
@@ -753,10 +749,9 @@ class LiveEngine:
         tick_price = float(tick.bid)
         target = cache["target_price"]
         atr = cache["atr"]
-        point = cache["point"]
 
-        # Gate 1: price must be in the 0.2×ATR ambush zone
-        if abs(tick_price - target) > 0.2 * atr:
+        # Gate 1: price must be in the 0.5×ATR ambush zone
+        if abs(tick_price - target) > 0.5 * atr:
             return False
 
         now = time.time()
@@ -774,12 +769,12 @@ class LiveEngine:
         if time_elapsed < 3.0:
             return False  # Let time elapse naturally until ≥ 3 s
 
-        # Stealth trigger: 15-point pre-fire buffer (latency compensation)
-        trigger_buffer = 15 * point
-        if cache["action"] == ACTION_BUY and tick_price > target + trigger_buffer:
-            return False  # Not close enough to target yet
-        if cache["action"] == ACTION_SELL and tick_price < target - trigger_buffer:
-            return False  # Not close enough to target yet
+        # Zone trigger: fire when tick penetrates 0.2×ATR tolerance of target
+        tolerance = 0.2 * atr
+        if cache["action"] == ACTION_BUY and tick_price > target + tolerance:
+            return False  # Not pulled back deep enough yet
+        if cache["action"] == ACTION_SELL and tick_price < target - tolerance:
+            return False  # Not bounced high enough yet
 
         # All guards passed — FIRE
         action_name = "BUY" if cache["action"] == ACTION_BUY else "SELL"
