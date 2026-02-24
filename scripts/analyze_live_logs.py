@@ -84,6 +84,16 @@ _CONFIDENCE_GATE_RE = re.compile(
     r"CONFIDENCE GATE: ([\d.]+)% < ([\d.]+)% threshold"
 )
 
+# V3.x defense system patterns
+_VKR_GATE_RE = re.compile(r"VKR GATE: (\w+) blocked")
+_GRACE_PERIOD_RE = re.compile(r"GRACE PERIOD: Shielding trade #(\d+)")
+_PHANTOM_FIRE_RE = re.compile(r"(PHANTOM_SWEEP|MOMENTUM_BOUNCE) FIRE: (\w+)")
+_PYRAMID_RE = re.compile(r"RISK-FREE PYRAMIDING:")
+_BREAK_EVEN_RE = re.compile(r"BREAK-EVEN ACTIVATED for Ticket #(\d+)")
+_PARTIAL_CLOSE_RE = re.compile(r"PARTIAL CLOSE:")
+_TIME_DECAY_RE = re.compile(r"TIME-DECAY SHIELD: Trade #(\d+)")
+_SPREAD_GATE_RE = re.compile(r"SPREAD GATE:")
+
 
 # ══════════════════════════════════════════════
 # Data Structures
@@ -122,6 +132,15 @@ class DashboardData:
     regime_confidences: dict[str, list[float]] = field(
         default_factory=lambda: defaultdict(list)
     )
+    # V3.x defense systems
+    vkr_gate_count: int = 0
+    grace_period_count: int = 0
+    phantom_fire_count: int = 0
+    pyramid_count: int = 0
+    break_even_count: int = 0
+    partial_close_count: int = 0
+    time_decay_count: int = 0
+    spread_gate_count: int = 0
 
 
 # ══════════════════════════════════════════════
@@ -343,6 +362,32 @@ def parse_logs(log_files: Sequence[Path]) -> DashboardData:
                     data.confidence_gate_count += 1
                     continue
 
+                # ── V3.x defense systems ──
+                if _VKR_GATE_RE.search(msg):
+                    data.vkr_gate_count += 1
+                    continue
+                if _GRACE_PERIOD_RE.search(msg):
+                    data.grace_period_count += 1
+                    continue
+                if _PHANTOM_FIRE_RE.search(msg):
+                    data.phantom_fire_count += 1
+                    continue
+                if _PYRAMID_RE.search(msg):
+                    data.pyramid_count += 1
+                    continue
+                if _BREAK_EVEN_RE.search(msg):
+                    data.break_even_count += 1
+                    continue
+                if _PARTIAL_CLOSE_RE.search(msg):
+                    data.partial_close_count += 1
+                    continue
+                if _TIME_DECAY_RE.search(msg):
+                    data.time_decay_count += 1
+                    continue
+                if _SPREAD_GATE_RE.search(msg):
+                    data.spread_gate_count += 1
+                    continue
+
     return data
 
 
@@ -512,7 +557,7 @@ def display_dashboard(data: DashboardData) -> None:
     exp = _expectancy(trades)
 
     # ── Header ──
-    _header("APEX PREDATOR V2 — LIVE PERFORMANCE DASHBOARD")
+    _header("APEX PREDATOR V3.5 — LIVE PERFORMANCE DASHBOARD")
 
     if data.balance_series:
         first_ts = data.balance_series[0][0].strftime("%Y-%m-%d %H:%M")
@@ -686,6 +731,24 @@ def display_dashboard(data: DashboardData) -> None:
                     f"{r_avg:>9.1f}% {r_min:>7.1f}% {r_max:>7.1f}%"
                 )
 
+    # ── V3.x Defense Systems ──
+    v3_total = (
+        data.break_even_count + data.partial_close_count
+        + data.phantom_fire_count + data.pyramid_count
+        + data.time_decay_count + data.vkr_gate_count
+        + data.grace_period_count + data.spread_gate_count
+    )
+    if v3_total > 0:
+        _section("V3.x DEFENSE SYSTEMS")
+        _kv("Break-Even Activations", f"{data.break_even_count}")
+        _kv("Partial Closes (50%)", f"{data.partial_close_count}")
+        _kv("Phantom Spoofer Fires", f"{data.phantom_fire_count}")
+        _kv("Pyramid Positions", f"{data.pyramid_count}")
+        _kv("Time-Decay Force Closes", f"{data.time_decay_count}")
+        _kv("VKR Gate Blocks", f"{data.vkr_gate_count}")
+        _kv("Grace Period Shields", f"{data.grace_period_count}")
+        _kv("Spread Gate Skips", f"{data.spread_gate_count}")
+
     # ── Recent Trades (last 10) ──
     if trades:
         _section(f"RECENT TRADES (last {min(10, len(trades))})")
@@ -735,7 +798,7 @@ def export_csv(trades: Sequence[Trade], path: str) -> None:
 # ══════════════════════════════════════════════
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Apex Predator V2 — Live Performance Dashboard",
+        description="Apex Predator V3.5 — Live Performance Dashboard",
     )
     parser.add_argument(
         "--date",
