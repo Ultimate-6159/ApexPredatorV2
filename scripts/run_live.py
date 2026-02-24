@@ -15,9 +15,10 @@ SRS Requirements Implemented:
   7. Logging & Fail-Safes — MT5 auto-reconnect, daily rotating log
 
 V3 Upgrades:
-  8. ATR-Based Dynamic Trailing Stop — adapts to volatility (narrow in ranging, wide in trending)
-  9. News Filter — Forex Factory calendar, forces HIGH_VOLATILITY before red events
- 10. Inference Telemetry — action probabilities, critic value, anomaly detection
+   8. ATR-Based Dynamic Trailing Stop — adapts to volatility (narrow in ranging, wide in trending)
+   9. News Filter — Forex Factory calendar, forces HIGH_VOLATILITY before red events
+  10. Inference Telemetry — action probabilities, critic value, anomaly detection
+  11. Infinite Radar (V2.17) — intra-bar re-prediction keeps cache alive until signal fires
 
 Usage:
     python -m scripts.run_live [--timeframe M5] [--symbol XAUUSDm]
@@ -245,6 +246,10 @@ class LiveEngine:
         # Predictive Cache (V2.14 — Velocity-Aware intra-bar trigger)
         self._predictive_cache: dict[str, Any] | None = None
 
+        # Infinite Radar (V2.17 — continuous intra-bar re-prediction)
+        self._radar_active: bool = False
+        self._last_repredict_time: float = 0.0
+
         # Elastic Cooldown Reload (V2.14 — replaces Win-Streak)
         self._swing_extended: bool = True  # True at startup to allow first trade
         self._last_ema7: float = 0.0
@@ -363,6 +368,7 @@ class LiveEngine:
             if bar_time != self._last_bar_time:
                 self._last_bar_time = bar_time
                 self._predictive_cache = None  # Clear stale cache on new bar
+                self._radar_active = False     # V2.17: reset radar on new bar
                 return True
 
             # Intra-bar monitoring (V2.14)
@@ -370,6 +376,14 @@ class LiveEngine:
 
             if self._predictive_cache is not None:
                 self._check_predictive_cache()
+
+            # V2.17 Infinite Radar: re-predict when cache expired and flat
+            if (
+                self._predictive_cache is None
+                and self._radar_active
+                and not self.risk.has_open_trade
+            ):
+                self._intra_bar_re_predict()
 
             # Dynamic polling: 50 ms HFT when active, 1 s when idle
             if self._predictive_cache is not None or self.risk.has_open_trade:
@@ -614,6 +628,7 @@ class LiveEngine:
                             "timestamp": time.time(),
                             "atr": self._current_atr,
                         }
+                        self._radar_active = True  # V2.17: keep radar spinning
                         actual_action = ACTION_HOLD
 
                 elif actual_action == ACTION_SELL and regime == Regime.TRENDING_DOWN:
@@ -648,6 +663,7 @@ class LiveEngine:
                             "timestamp": time.time(),
                             "atr": self._current_atr,
                         }
+                        self._radar_active = True  # V2.17: keep radar spinning
                         actual_action = ACTION_HOLD
 
             # 12e. Elastic Cooldown Reload — step-trend re-entry gate (V2.14)
@@ -793,7 +809,205 @@ class LiveEngine:
             cache["action"], cache["regime"], pd.DataFrame(), acct["equity"],
         )
         self._predictive_cache = None
+        self._radar_active = False  # V2.17: mission accomplished
         return True
+
+    # ── Infinite Radar (V2.17 — Intra-Bar Re-Prediction) ─
+    def _intra_bar_re_predict(self) -> bool:
+        """Re-run AI prediction mid-candle after a cache expires.
+
+        V2.17 Infinite Radar: When a deferred signal's cache expires (>10 s),
+        fetch fresh OHLCV, re-detect regime, re-run inference, and create a
+        new Predictive Cache if the AI still signals BUY/SELL with ribbon
+        deferral.  The radar keeps spinning until the bar closes or the
+        signal fires.
+
+        Throttle: max 1 re-prediction per 10 s (natural cache cycle).
+        Only runs when flat (no open position).
+        """
+        if self.risk.has_open_trade:
+            return False
+
+        now = time.time()
+        if now - self._last_repredict_time < 10.0:
+            return False
+        self._last_repredict_time = now
+
+        try:
+            # ── Fresh data ──
+            ohlcv = self.perception.fetch_ohlcv()
+            features = self.perception.compute_features(ohlcv)
+            latest_row = features.iloc[-1]
+
+            # ATR
+            hl_range = (ohlcv["High"] - ohlcv["Low"]).rolling(ATR_PERIOD).mean()
+            self._current_atr = (
+                float(hl_range.iloc[-1]) if not hl_range.empty else 0.0
+            )
+            if self._current_atr <= 0 or len(ohlcv) < 20:
+                return False
+
+            # EMA7
+            self._last_ema7 = float(
+                ohlcv["Close"].ewm(span=7, adjust=False).mean().iloc[-1]
+            )
+
+            # ── Regime detection ──
+            regime = self.router.detect_regime(latest_row)
+            if self.news_filter is not None:
+                blackout, _ = self.news_filter.is_blackout()
+                if blackout and regime != Regime.HIGH_VOLATILITY:
+                    regime = Regime.HIGH_VOLATILITY
+
+            # Only re-predict for trending regimes (where ribbon deferral occurs)
+            if regime not in (Regime.TRENDING_UP, Regime.TRENDING_DOWN):
+                self.log.info(
+                    "🔄 RADAR: Regime=%s (non-trending) — radar off",
+                    regime.value,
+                )
+                self._radar_active = False
+                return False
+
+            # Safety: drawdown + circuit breaker
+            acct = self.perception.get_account_info()
+            if self.risk.check_drawdown(acct["balance"]) or self.risk.is_halted:
+                return False
+
+            # ── Normalize + sanitize ──
+            raw_obs = latest_row.values.astype(np.float32)
+            agent_data = self.agents[regime]
+            obs_normalized = _normalize_obs(raw_obs, agent_data["stats"])
+            obs_ready = obs_normalized.reshape(1, -1)
+            obs_ready = np.nan_to_num(
+                obs_ready, nan=0.0,
+                posinf=OBS_CLIP_RANGE, neginf=-OBS_CLIP_RANGE,
+            )
+            obs_ready = np.clip(obs_ready, -OBS_CLIP_RANGE, OBS_CLIP_RANGE)
+            if np.any(np.isnan(obs_ready)) or np.any(np.isinf(obs_ready)):
+                obs_ready = np.nan_to_num(
+                    obs_ready, nan=0.0, posinf=0.0, neginf=0.0,
+                )
+
+            # ── Inference ──
+            agent_model: PPO = agent_data["model"]
+            probs: np.ndarray | None = None
+            try:
+                obs_tensor, _ = agent_model.policy.obs_to_tensor(obs_ready)
+                with torch.no_grad():
+                    dist = agent_model.policy.get_distribution(obs_tensor)
+                    probs = dist.distribution.probs.cpu().numpy()[0]
+            except Exception:
+                pass
+
+            action_idx, _ = agent_model.predict(obs_ready, deterministic=True)
+            raw_action = int(action_idx.item())
+            allowed = AGENT_ACTION_MAP[regime]
+            actual_action = allowed[raw_action]
+
+            # Confidence gate
+            if actual_action != ACTION_HOLD and probs is not None:
+                action_conf = float(probs[raw_action]) * 100
+                if action_conf < CONFIDENCE_GATE_PCT:
+                    self.log.info(
+                        "🔄 RADAR: Confidence %.1f%% < %.0f%% — no cache",
+                        action_conf, CONFIDENCE_GATE_PCT,
+                    )
+                    return False
+
+            if actual_action == ACTION_HOLD:
+                self.log.info("🔄 RADAR: AI says HOLD — waiting")
+                return False
+
+            # ── Ribbon filter (same logic as step 12d) ──
+            close_series = ohlcv["Close"]
+            current_high = float(ohlcv["High"].iloc[-1])
+            current_low = float(ohlcv["Low"].iloc[-1])
+            current_ema7 = float(
+                close_series.ewm(span=7, adjust=False).mean().iloc[-1]
+            )
+            current_ema20 = float(
+                close_series.ewm(span=20, adjust=False).mean().iloc[-1]
+            )
+            ribbon_gap = abs(current_ema7 - current_ema20)
+            rsi_fast_val = float(latest_row.get("rsi_fast", 50.0))
+
+            _tick = mt5.symbol_info_tick(self.symbol)
+            tick_price = (
+                float(_tick.bid) if _tick is not None
+                else float(close_series.iloc[-1])
+            )
+
+            if actual_action == ACTION_BUY and regime == Regime.TRENDING_UP:
+                if rsi_fast_val >= 85.0:
+                    return False
+                ribbon_ok = (
+                    current_ema7 > current_ema20
+                    and ribbon_gap >= 0.1 * self._current_atr
+                    and current_low <= current_ema7 + 0.2 * self._current_atr
+                    and tick_price > current_ema7
+                )
+                if not ribbon_ok:
+                    self._predictive_cache = {
+                        "action": ACTION_BUY,
+                        "regime": regime,
+                        "target_price": current_ema7,
+                        "timestamp": time.time(),
+                        "atr": self._current_atr,
+                    }
+                    self.log.info(
+                        "🔄 RADAR CACHE: BUY "
+                        "(EMA7=%.2f, ATR=%.2f, tick=%.2f)",
+                        current_ema7, self._current_atr, tick_price,
+                    )
+                    return True
+                # Ribbon passed — dispatch directly
+                self.log.info(
+                    "🔄 RADAR FIRE: BUY (ribbon OK, tick=%.2f)", tick_price,
+                )
+                self._dispatch_action(
+                    ACTION_BUY, regime, ohlcv, acct["equity"],
+                )
+                self._radar_active = False
+                return True
+
+            if actual_action == ACTION_SELL and regime == Regime.TRENDING_DOWN:
+                if rsi_fast_val <= 15.0:
+                    return False
+                ribbon_ok = (
+                    current_ema7 < current_ema20
+                    and ribbon_gap >= 0.1 * self._current_atr
+                    and current_high >= current_ema7 - 0.2 * self._current_atr
+                    and tick_price < current_ema7
+                )
+                if not ribbon_ok:
+                    self._predictive_cache = {
+                        "action": ACTION_SELL,
+                        "regime": regime,
+                        "target_price": current_ema7,
+                        "timestamp": time.time(),
+                        "atr": self._current_atr,
+                    }
+                    self.log.info(
+                        "🔄 RADAR CACHE: SELL "
+                        "(EMA7=%.2f, ATR=%.2f, tick=%.2f)",
+                        current_ema7, self._current_atr, tick_price,
+                    )
+                    return True
+                # Ribbon passed — dispatch directly
+                self.log.info(
+                    "🔄 RADAR FIRE: SELL (ribbon OK, tick=%.2f)", tick_price,
+                )
+                self._dispatch_action(
+                    ACTION_SELL, regime, ohlcv, acct["equity"],
+                )
+                self._radar_active = False
+                return True
+
+            return False
+
+        except Exception:
+            self.log.exception("Intra-bar re-prediction failed")
+            return False
 
     # ── Elastic Cooldown — intra-bar swing tracking ─
     def _update_swing_tracking(self) -> None:

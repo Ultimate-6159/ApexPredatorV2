@@ -23,6 +23,7 @@ Apex Predator V2 solves **Catastrophic Forgetting** — the #1 failure mode of s
 | **Anti-Martingale** | Max 1 position, 8% risk, circuit breaker |
 | **Inference Safety Guards** | Z-Score clip ±10.0, confidence gate 65%, anomaly detection |
 | **Predictive Cache** | Velocity-aware intra-bar trigger with 3-gate system (zone/time/velocity) |
+| **Infinite Radar** | Cache expired → re-predict mid-candle → new cache (never blind intra-bar) |
 | **Stealth Execution** | 15-point pre-fire buffer + 35pt deviation (latency compensation) |
 | **Elastic Cooldown** | Step-trend reload: swing extension > 0.5×ATR + pullback < 0.2×ATR |
 | **Live Performance Dashboard** | Parses live logs → Win Rate, Profit Factor, Sharpe, Sortino, Calmar |
@@ -161,6 +162,7 @@ Each agent is a PPO model trained in a custom Gymnasium environment with regime-
 | **Live-Tick Precision** | EMA7 + EMA20 | Real-time tick bounce: gap ≥ 0.1×ATR + tick above/below EMA7 |
 | **RSI Anti-Chasing** | RSI(7) 15–85 | Block BUY if RSI≥85, block SELL if RSI≤15 |
 | **Predictive Cache** | 3-gate intra-bar | Velocity (≥3s) + Time (<10s) + Zone (0.2×ATR) |
+| **Infinite Radar** | 10s re-predict | Cache expired → re-run AI mid-candle → new cache (V2.17) |
 | **Stealth Trigger** | 15-point buffer | Fire 15pts before target (latency compensation) |
 | **Elastic Cooldown** | Swing + Pullback | Swing >0.5×ATR then pullback <0.2×ATR for re-entry |
 
@@ -257,6 +259,9 @@ Intra-bar (V2.15 — 50 ms HFT polling when active):
 •  HFT Re-entry: intra-bar close → force AI re-evaluation instantly
 •  Predictive Cache: zone/velocity/time gates → stealth fire
 •  Elastic Cooldown: swing tracking (|tick − EMA7| > 0.5×ATR)
+•  Infinite Radar (V2.17): cache expired → re-predict mid-candle → new cache
+   Throttle: max 1 re-prediction per 10 s.  Radar stays active until bar close
+   or signal fires.  Non-trending regime → radar off automatically.
 ```
 
 ### Position-Aware Dispatch Logic (Step 13)
