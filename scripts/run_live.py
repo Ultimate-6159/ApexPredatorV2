@@ -19,6 +19,7 @@ V3 Upgrades:
    9. News Filter — Forex Factory calendar, forces HIGH_VOLATILITY before red events
   10. Inference Telemetry — action probabilities, critic value, anomaly detection
   11. Infinite Radar (V2.17) — intra-bar re-prediction keeps cache alive until signal fires
+  12. HOLD Semantics Fix (V2.18) — HOLD preserves open position, exits via TP/SL/Trailing only
 
 Usage:
     python -m scripts.run_live [--timeframe M5] [--symbol XAUUSDm]
@@ -1231,7 +1232,7 @@ class LiveEngine:
 
         Rules:
           HOLD + flat       → do nothing (wait)
-          HOLD + in position→ voluntary close
+          HOLD + in position→ maintain position (let TP/SL/Trailing close it)
           BUY/SELL + flat   → open new position
           BUY/SELL + same   → PASS  (Anti-Martingale: max 1 position)
           BUY/SELL + opposite → close existing (don't reopen this bar)
@@ -1242,11 +1243,14 @@ class LiveEngine:
         # -- HOLD action --
         if action == ACTION_HOLD:
             if has_trade:
+                # V2.18: HOLD means "no new entry" — NOT "exit current trade".
+                # Let TP/SL, Break-Even, Trailing Stop, or Regime Shift
+                # handle the exit instead of prematurely closing a runner.
                 self.log.info(
-                    "VOLUNTARY CLOSE (HOLD signal while in %s)",
+                    "HOLD signal — maintaining %s position #%d",
                     trade.direction,
+                    trade.ticket,
                 )
-                self._close_and_track("VOLUNTARY_CLOSE")
             return
 
         # -- BUY or SELL --

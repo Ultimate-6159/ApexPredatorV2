@@ -269,7 +269,7 @@ Intra-bar (V2.15 — 50 ms HFT polling when active):
 | State | AI Signal | Action |
 |---|---|---|
 | Flat (no position) | HOLD | Do nothing (wait) |
-| In position | HOLD | Voluntary close |
+| In position | HOLD | Maintain position (V2.18 — let TP/SL/Trailing close it) |
 | Flat | BUY or SELL | Open new position |
 | In BUY position | BUY | PASS (Anti-Martingale) |
 | In BUY position | SELL | Close BUY (don't reopen this bar) |
