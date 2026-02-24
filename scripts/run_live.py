@@ -466,12 +466,12 @@ class LiveEngine:
             self._current_atr = float(hl_range.iloc[-1]) if not hl_range.empty else 0.0
 
             # 3d. Compute average tick volume (50-bar rolling, V3.5 VKR baseline)
-            if "Tick_Volume" in ohlcv.columns and len(ohlcv) >= 50:
+            if "Volume" in ohlcv.columns and len(ohlcv) >= 50:
                 self._avg_tick_volume = float(
-                    ohlcv["Tick_Volume"].iloc[-50:].mean()
+                    ohlcv["Volume"].iloc[-50:].mean()
                 )
-            elif "Tick_Volume" in ohlcv.columns and len(ohlcv) > 0:
-                self._avg_tick_volume = float(ohlcv["Tick_Volume"].mean())
+            elif "Volume" in ohlcv.columns and len(ohlcv) > 0:
+                self._avg_tick_volume = float(ohlcv["Volume"].mean())
 
             # 3c. Cache EMA7 for ribbon filter + elastic cooldown
             if len(ohlcv) >= 7:
