@@ -242,9 +242,12 @@ class LiveEngine:
         self._break_even_done: bool = False
         self._partial_close_done: bool = False
 
-        # Win-Streak Reload state (same-bar re-entry only after TP)
-        self._last_close_bar: int = 0
-        self._last_close_profitable: bool = False
+        # Predictive Cache (V2.14 — Velocity-Aware intra-bar trigger)
+        self._predictive_cache: dict[str, Any] | None = None
+
+        # Elastic Cooldown Reload (V2.14 — replaces Win-Streak)
+        self._swing_extended: bool = True  # True at startup to allow first trade
+        self._last_ema7: float = 0.0
 
         # News filter
         self.news_filter: NewsFilter | None = None
@@ -324,7 +327,10 @@ class LiveEngine:
 
     # ── Bar Detection  (SRS §3) ───────────────
     def _wait_for_new_bar(self) -> bool:
-        """Block until a new bar closes. Returns False on unrecoverable error."""
+        """Block until a new bar closes. Returns False on unrecoverable error.
+
+        V2.14: Intra-bar monitoring for Predictive Cache + Elastic Cooldown.
+        """
         while True:
             if not self._check_connection():
                 return False
@@ -339,9 +345,17 @@ class LiveEngine:
             bar_time = int(rates[0]["time"])
             if bar_time != self._last_bar_time:
                 self._last_bar_time = bar_time
+                self._predictive_cache = None  # Clear stale cache on new bar
                 return True
 
-            time.sleep(_POLL_INTERVAL_SEC)
+            # Intra-bar monitoring (V2.14)
+            self._update_swing_tracking()
+
+            if self._predictive_cache is not None:
+                self._check_predictive_cache()
+                time.sleep(1)  # Fast poll when cache active
+            else:
+                time.sleep(_POLL_INTERVAL_SEC)
 
     # ── Main Loop ─────────────────────────────
     def _main_loop(self) -> None:
@@ -383,6 +397,12 @@ class LiveEngine:
             # 3. Compute & store ATR (used by trailing stop + dispatch)
             hl_range = (ohlcv["High"] - ohlcv["Low"]).rolling(ATR_PERIOD).mean()
             self._current_atr = float(hl_range.iloc[-1]) if not hl_range.empty else 0.0
+
+            # 3c. Cache EMA7 for ribbon filter + elastic cooldown
+            if len(ohlcv) >= 7:
+                self._last_ema7 = float(
+                    ohlcv["Close"].ewm(span=7, adjust=False).mean().iloc[-1]
+                )
 
             # 3a. Spread/ATR Normalization Gate — skip bar if ATR too small vs spread
             sym_info = self.perception.get_symbol_info()
@@ -519,6 +539,7 @@ class LiveEngine:
 
             # 12d. Live-Tick Precision with Momentum Confirmation (EMA7 + EMA20)
             #   Uses real-time tick price for bounce confirmation
+            #   V2.14: Deferred actions cached for intra-bar Predictive Cache
             if (
                 actual_action in (ACTION_BUY, ACTION_SELL)
                 and regime in (Regime.TRENDING_UP, Regime.TRENDING_DOWN)
@@ -541,6 +562,8 @@ class LiveEngine:
                 _tick = mt5.symbol_info_tick(self.symbol)
                 tick_price = float(_tick.bid) if _tick is not None else float(close_series.iloc[-1])
 
+                _sym_cache = self.perception.get_symbol_info()
+
                 if actual_action == ACTION_BUY and regime == Regime.TRENDING_UP:
                     ribbon_ok = (
                         current_ema7 > current_ema20
@@ -556,7 +579,7 @@ class LiveEngine:
                         actual_action = ACTION_HOLD
                     elif not ribbon_ok:
                         self.log.info(
-                            "⏳ RIBBON: BUY deferred "
+                            "⏳ RIBBON: BUY deferred → PREDICTIVE CACHE "
                             "(EMA7=%.2f, EMA20=%.2f, gap=%.2f, "
                             "low=%.2f, tick=%.2f, ATR=%.2f)",
                             current_ema7,
@@ -566,6 +589,14 @@ class LiveEngine:
                             tick_price,
                             self._current_atr,
                         )
+                        self._predictive_cache = {
+                            "action": ACTION_BUY,
+                            "regime": regime,
+                            "target_price": current_ema7,
+                            "timestamp": time.time(),
+                            "atr": self._current_atr,
+                            "point": _sym_cache["point"],
+                        }
                         actual_action = ACTION_HOLD
 
                 elif actual_action == ACTION_SELL and regime == Regime.TRENDING_DOWN:
@@ -583,7 +614,7 @@ class LiveEngine:
                         actual_action = ACTION_HOLD
                     elif not ribbon_ok:
                         self.log.info(
-                            "⏳ RIBBON: SELL deferred "
+                            "⏳ RIBBON: SELL deferred → PREDICTIVE CACHE "
                             "(EMA7=%.2f, EMA20=%.2f, gap=%.2f, "
                             "high=%.2f, tick=%.2f, ATR=%.2f)",
                             current_ema7,
@@ -593,19 +624,58 @@ class LiveEngine:
                             tick_price,
                             self._current_atr,
                         )
+                        self._predictive_cache = {
+                            "action": ACTION_SELL,
+                            "regime": regime,
+                            "target_price": current_ema7,
+                            "timestamp": time.time(),
+                            "atr": self._current_atr,
+                            "point": _sym_cache["point"],
+                        }
                         actual_action = ACTION_HOLD
 
-            # 12e. Win-Streak Reload guard — same-bar re-entry only after TP
+            # 12e. Elastic Cooldown Reload — step-trend re-entry gate (V2.14)
+            #   Requires: (1) swing extension > 0.5×ATR from EMA7, then
+            #             (2) pullback to < 0.2×ATR from EMA7
             if (
                 actual_action in (ACTION_BUY, ACTION_SELL)
                 and not self.risk.has_open_trade
-                and self._last_close_bar == self._bar_count
-                and not self._last_close_profitable
+                and regime in (Regime.TRENDING_UP, Regime.TRENDING_DOWN)
+                and self._last_ema7 > 0
+                and self._current_atr > 0
             ):
-                self.log.info(
-                    "🔒 WIN-STREAK: Re-entry blocked (last close on this bar was loss/BE)"
-                )
-                actual_action = ACTION_HOLD
+                _tick_ec = mt5.symbol_info_tick(self.symbol)
+                if _tick_ec is not None:
+                    _tp_ec = float(_tick_ec.bid)
+                    _dist_ec = abs(_tp_ec - self._last_ema7)
+
+                    # Track swing extension
+                    if _dist_ec > 0.5 * self._current_atr:
+                        self._swing_extended = True
+
+                    if not self._swing_extended:
+                        self.log.info(
+                            "🔒 ELASTIC: Swing not extended yet "
+                            "(dist=%.2f < 0.5×ATR=%.2f)",
+                            _dist_ec,
+                            0.5 * self._current_atr,
+                        )
+                        actual_action = ACTION_HOLD
+                    elif _dist_ec > 0.2 * self._current_atr:
+                        self.log.info(
+                            "🔒 ELASTIC: Awaiting pullback "
+                            "(dist=%.2f > 0.2×ATR=%.2f)",
+                            _dist_ec,
+                            0.2 * self._current_atr,
+                        )
+                        actual_action = ACTION_HOLD
+                    else:
+                        self.log.info(
+                            "🔄 ELASTIC RELOAD: Entry cleared "
+                            "(swing OK, pullback dist=%.2f < 0.2×ATR=%.2f)",
+                            _dist_ec,
+                            0.2 * self._current_atr,
+                        )
 
             # 13. Dispatch with position-aware logic  (SRS §5 + §6)
             self._dispatch_action(actual_action, regime, ohlcv, equity)
@@ -626,27 +696,121 @@ class LiveEngine:
         except Exception:
             self.log.exception("Error processing bar #%d", self._bar_count)
 
-    # ── Close with Win-Streak tracking ────────
+    # ── Close with Elastic Cooldown reset ─────
     def _close_and_track(self, reason: str) -> bool:
-        """Close trade and update Win-Streak Reload state."""
+        """Close trade and reset Elastic Cooldown state (V2.14)."""
         trade = self.risk.open_trade
         if trade is None:
             return False
 
-        # Estimate PnL direction before closing
-        tick = mt5.symbol_info_tick(self.symbol)
-        pnl_positive = False
-        if tick is not None:
-            if trade.direction == "BUY":
-                pnl_positive = tick.bid > trade.entry_price
-            else:
-                pnl_positive = trade.entry_price > tick.ask
-
         result = self.executor.close_open_trade(reason)
         if result:
-            self._last_close_bar = self._bar_count
-            self._last_close_profitable = pnl_positive
+            self._swing_extended = False  # Reset for Elastic Cooldown
         return result
+
+    # ── Predictive Cache (V2.14 — Velocity-Aware) ─
+    def _check_predictive_cache(self) -> bool:
+        """Check and potentially fire cached prediction during intra-bar monitoring.
+
+        Three guards before execution:
+          1. Zone:     |tick - target| < 0.2 × ATR (ambush zone)
+          2. Time:     cache age < 10 s (freshness)
+          3. Velocity: cache age >= 3 s (not a spike-through)
+
+        Stealth trigger: fire 15 points BEFORE exact target (latency compensation).
+        """
+        if self._predictive_cache is None:
+            return False
+        if self.risk.has_open_trade:
+            self._predictive_cache = None
+            return False
+
+        cache = self._predictive_cache
+        tick = mt5.symbol_info_tick(self.symbol)
+        if tick is None:
+            return False
+
+        tick_price = float(tick.bid)
+        target = cache["target_price"]
+        atr = cache["atr"]
+        point = cache["point"]
+
+        # Gate 1: price must be in the 0.2×ATR ambush zone
+        if abs(tick_price - target) > 0.2 * atr:
+            return False
+
+        now = time.time()
+        time_elapsed = now - cache["timestamp"]
+
+        # Gate 2: cache freshness (expire after 10 s)
+        if time_elapsed > 10.0:
+            self.log.info(
+                "⏰ CACHE EXPIRED: %.1fs > 10s — discarding", time_elapsed,
+            )
+            self._predictive_cache = None
+            return False
+
+        # Gate 3: velocity guard (price rushed into zone < 3 s — re-predict)
+        if time_elapsed < 3.0:
+            self.log.info(
+                "⚡ VELOCITY GUARD: %.1fs < 3s — refreshing cache timestamp",
+                time_elapsed,
+            )
+            cache["timestamp"] = now  # Refresh so next check measures from now
+            return False
+
+        # Stealth trigger: 15-point pre-fire buffer (latency compensation)
+        trigger_buffer = 15 * point
+        if cache["action"] == ACTION_BUY and tick_price > target + trigger_buffer:
+            return False  # Not close enough to target yet
+        if cache["action"] == ACTION_SELL and tick_price < target - trigger_buffer:
+            return False  # Not close enough to target yet
+
+        # All guards passed — FIRE
+        action_name = "BUY" if cache["action"] == ACTION_BUY else "SELL"
+        self.log.info(
+            "🎯 PREDICTIVE CACHE FIRE: %s at tick=%.2f "
+            "(target=%.2f, elapsed=%.1fs, ATR=%.2f)",
+            action_name,
+            tick_price,
+            target,
+            time_elapsed,
+            atr,
+        )
+
+        acct = self.perception.get_account_info()
+        self._dispatch_action(
+            cache["action"], cache["regime"], pd.DataFrame(), acct["equity"],
+        )
+        self._predictive_cache = None
+        return True
+
+    # ── Elastic Cooldown — intra-bar swing tracking ─
+    def _update_swing_tracking(self) -> None:
+        """Track intra-bar swing extension for Elastic Cooldown.
+
+        Sets _swing_extended = True when |tick - EMA7| > 0.5 × ATR,
+        indicating the trend has pushed far enough for a meaningful pullback entry.
+        """
+        if self._swing_extended or self.risk.has_open_trade:
+            return
+        if self._last_ema7 <= 0 or self._current_atr <= 0:
+            return
+
+        tick = mt5.symbol_info_tick(self.symbol)
+        if tick is None:
+            return
+
+        tick_price = float(tick.bid)
+        if abs(tick_price - self._last_ema7) > 0.5 * self._current_atr:
+            self._swing_extended = True
+            self.log.info(
+                "🔄 ELASTIC: Swing extended "
+                "(|%.2f - EMA7 %.2f| > 0.5×ATR %.2f)",
+                tick_price,
+                self._last_ema7,
+                self._current_atr,
+            )
 
     # ── Profit Locking  (Break-Even + Partial Close) ─
     def _check_profit_locking(self) -> None:
@@ -858,7 +1022,7 @@ class LiveEngine:
                     "VOLUNTARY CLOSE (HOLD signal while in %s)",
                     trade.direction,
                 )
-                self.executor.close_open_trade("VOLUNTARY_CLOSE")
+                self._close_and_track("VOLUNTARY_CLOSE")
             return
 
         # -- BUY or SELL --
@@ -875,7 +1039,7 @@ class LiveEngine:
                     trade.direction,
                     direction,
                 )
-                self.executor.close_open_trade("OPPOSITE_SIGNAL")
+                self._close_and_track("OPPOSITE_SIGNAL")
                 return
 
         # Flat → open new position
@@ -941,9 +1105,8 @@ class LiveEngine:
                 profit,
             )
             self.risk.register_close(profit)
-            # Win-Streak Reload: record whether this close was profitable
-            self._last_close_bar = self._bar_count
-            self._last_close_profitable = profit > 0
+            # Elastic Cooldown: reset swing tracking for next entry
+            self._swing_extended = False
 
     def _get_closed_trade_profit(
         self, ticket: int, open_time: datetime

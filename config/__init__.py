@@ -73,7 +73,7 @@ MAX_HOLDING_BARS: dict[Regime, int] = {
 # ──────────────────────────────────────────────
 # Execution
 # ──────────────────────────────────────────────
-SLIPPAGE_POINTS: int = 30
+SLIPPAGE_POINTS: int = 35
 MAGIC_NUMBER: int = 615900
 ORDER_COMMENT: str = "ApexV2"
 

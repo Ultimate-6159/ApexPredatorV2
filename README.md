@@ -22,6 +22,9 @@ Apex Predator V2 solves **Catastrophic Forgetting** — the #1 failure mode of s
 | **Regime-Shift Protocol** | Force-close all positions on regime change |
 | **Anti-Martingale** | Max 1 position, 8% risk, circuit breaker |
 | **Inference Safety Guards** | Z-Score clip ±10.0, confidence gate 65%, anomaly detection |
+| **Predictive Cache** | Velocity-aware intra-bar trigger with 3-gate system (zone/time/velocity) |
+| **Stealth Execution** | 15-point pre-fire buffer + 35pt deviation (latency compensation) |
+| **Elastic Cooldown** | Step-trend reload: swing extension > 0.5×ATR + pullback < 0.2×ATR |
 | **Live Performance Dashboard** | Parses live logs → Win Rate, Profit Factor, Sharpe, Sortino, Calmar |
 
 ---
@@ -152,12 +155,14 @@ Each agent is a PPO model trained in a custom Gymnasium environment with regime-
 | **Circuit Breaker** | 5 losses → 30 min | Halt trading after consecutive losses |
 | **Max Drawdown** | `60%` | Full stop — no more trades |
 | **Anti-Martingale** | Max 1 position | Never adds to a losing position |
-| **Slippage Protection** | 30 points | Dynamic filling mode + deviation cap |
+| **Slippage Protection** | 35 points | Dynamic filling mode + deviation cap (latency-compensated) |
 | **Confidence Gate** | 65% | Force HOLD if AI is uncertain |
 | **Spread Gate** | ATR > 1.5×Spread | Skip bar if volatility too low for spread |
 | **Live-Tick Precision** | EMA7 + EMA20 | Real-time tick bounce: gap ≥ 0.1×ATR + tick above/below EMA7 |
 | **RSI Anti-Chasing** | RSI(7) 15–85 | Block BUY if RSI≥85, block SELL if RSI≤15 |
-| **Win-Streak Reload** | Same-bar re-entry | Re-enter same bar only if previous trade was profitable |
+| **Predictive Cache** | 3-gate intra-bar | Velocity (≥3s) + Time (<10s) + Zone (0.2×ATR) |
+| **Stealth Trigger** | 15-point buffer | Fire 15pts before target (latency compensation) |
+| **Elastic Cooldown** | Swing + Pullback | Swing >0.5×ATR then pullback <0.2×ATR for re-entry |
 
 ---
 
@@ -227,6 +232,7 @@ The `LiveEngine` fires once per bar close and executes a **15-step pipeline**:
  3.  Compute & store ATR (used by profit locking + dispatch)
  3a. Spread/ATR Normalization Gate — skip bar if ATR < 1.5×Spread
  3b. Profit locking check (Break-Even + Partial Close)
+ 3c. Cache EMA7 for ribbon filter + elastic cooldown
  4.  ATR trailing stop check (overrides AI)
  5.  Detect regime (Meta-Router)
  5b. News filter override (force HIGH_VOLATILITY if blackout)
@@ -241,10 +247,14 @@ The `LiveEngine` fires once per bar close and executes a **15-step pipeline**:
 12.  Map to actual action (regime-specific action space)
 12c. Confidence gate — force HOLD if confidence < 65%
 12b. Log telemetry (confidence %, critic value, per-action probs)
-12d. Live-Tick Precision — EMA7/EMA20 + real-time tick bounce confirmation
-12e. Win-Streak Reload — block same-bar re-entry after loss/BE
+12d. Live-Tick Precision — EMA7/EMA20 bounce + Predictive Cache on defer
+12e. Elastic Cooldown — swing extension + pullback gate (replaces Win-Streak)
 13.  Dispatch with position-aware logic (Anti-Martingale)
 14.  Log bar result
+
+Intra-bar (between bar closes):
+•  Predictive Cache: 1s poll → zone/velocity/time gates → stealth fire
+•  Elastic Cooldown: swing tracking (|tick − EMA7| > 0.5×ATR)
 ```
 
 ### Position-Aware Dispatch Logic (Step 13)
@@ -484,7 +494,7 @@ python -m scripts.analyze_live_logs --csv trades.csv
 
 | Parameter | Default | Description |
 |---|---|---|
-| `SLIPPAGE_POINTS` | `30` | Max slippage deviation |
+| `SLIPPAGE_POINTS` | `35` | Max slippage deviation (latency-compensated) |
 | `ATR_SL_MULTIPLIER` | `1.5` | SL = 1.5 × ATR |
 | `ATR_TP_MULTIPLIER` | 0.80–1.50 | Per-regime TP (MR=0.80, TU/TD=1.20, HV=1.50) |
 
