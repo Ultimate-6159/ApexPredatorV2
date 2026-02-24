@@ -329,17 +329,34 @@ class LiveEngine:
     def _wait_for_new_bar(self) -> bool:
         """Block until a new bar closes. Returns False on unrecoverable error.
 
-        V2.14: Intra-bar monitoring for Predictive Cache + Elastic Cooldown.
+        V2.15: Tick-level risk management (Break-Even / Trailing / Sync)
+               runs every 50 ms while a position is open or cache is active.
+               HFT Re-entry: if a position closes intra-bar, force an
+               immediate AI re-evaluation by returning True.
         """
         while True:
             if not self._check_connection():
                 return False
 
+            # --- V2.15: Intra-bar tick-level risk management ---
+            was_open = self.risk.has_open_trade
+            self._sync_position_state()
+            self._check_profit_locking()
+            self._check_trailing_stop()
+
+            # HFT Re-entry: position just closed intra-bar → force AI now
+            if was_open and not self.risk.has_open_trade:
+                self.log.info(
+                    "⚡ INTRA-BAR CLOSE: Forcing AI re-evaluation!"
+                )
+                return True
+            # --------------------------------------------------
+
             rates = mt5.copy_rates_from_pos(
                 self.symbol, self.perception.timeframe, 0, 1
             )
             if rates is None or len(rates) == 0:
-                time.sleep(_POLL_INTERVAL_SEC)
+                time.sleep(1)
                 continue
 
             bar_time = int(rates[0]["time"])
@@ -353,9 +370,12 @@ class LiveEngine:
 
             if self._predictive_cache is not None:
                 self._check_predictive_cache()
-                time.sleep(1)  # Fast poll when cache active
+
+            # Dynamic polling: 50 ms HFT when active, 1 s when idle
+            if self._predictive_cache is not None or self.risk.has_open_trade:
+                time.sleep(0.05)
             else:
-                time.sleep(_POLL_INTERVAL_SEC)
+                time.sleep(1)
 
     # ── Main Loop ─────────────────────────────
     def _main_loop(self) -> None:
@@ -750,14 +770,9 @@ class LiveEngine:
             self._predictive_cache = None
             return False
 
-        # Gate 3: velocity guard (price rushed into zone < 3 s — re-predict)
+        # Gate 3: velocity guard (price rushed into zone < 3 s)
         if time_elapsed < 3.0:
-            self.log.info(
-                "⚡ VELOCITY GUARD: %.1fs < 3s — refreshing cache timestamp",
-                time_elapsed,
-            )
-            cache["timestamp"] = now  # Refresh so next check measures from now
-            return False
+            return False  # Let time elapse naturally until ≥ 3 s
 
         # Stealth trigger: 15-point pre-fire buffer (latency compensation)
         trigger_buffer = 15 * point

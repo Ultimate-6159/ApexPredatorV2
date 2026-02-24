@@ -252,8 +252,10 @@ The `LiveEngine` fires once per bar close and executes a **15-step pipeline**:
 13.  Dispatch with position-aware logic (Anti-Martingale)
 14.  Log bar result
 
-Intra-bar (between bar closes):
-•  Predictive Cache: 1s poll → zone/velocity/time gates → stealth fire
+Intra-bar (V2.15 — 50 ms HFT polling when active):
+•  Tick-level Risk: Sync + Break-Even + Trailing every 50 ms
+•  HFT Re-entry: intra-bar close → force AI re-evaluation instantly
+•  Predictive Cache: zone/velocity/time gates → stealth fire
 •  Elastic Cooldown: swing tracking (|tick − EMA7| > 0.5×ATR)
 ```
 
