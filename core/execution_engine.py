@@ -266,6 +266,11 @@ class ExecutionEngine:
         if trade is None:
             return False
 
+        # V3.7: Guard — skip if lot already at broker minimum
+        info = mt5.symbol_info(self.symbol)
+        if info is not None and trade.lot <= info.volume_min:
+            return False
+
         # Sync position ticket from broker
         actual_ticket = trade.ticket
         positions = mt5.positions_get(symbol=self.symbol)

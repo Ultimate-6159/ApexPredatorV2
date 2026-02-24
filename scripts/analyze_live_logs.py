@@ -93,6 +93,7 @@ _BREAK_EVEN_RE = re.compile(r"BREAK-EVEN ACTIVATED for Ticket #(\d+)")
 _PARTIAL_CLOSE_RE = re.compile(r"PARTIAL CLOSE:")
 _TIME_DECAY_RE = re.compile(r"TIME-DECAY SHIELD: Trade #(\d+)")
 _SPREAD_GATE_RE = re.compile(r"SPREAD GATE:")
+_COOLDOWN_RE = re.compile(r"COOLDOWN: Waiting for next bar")
 
 
 # ══════════════════════════════════════════════
@@ -141,9 +142,10 @@ class DashboardData:
     partial_close_count: int = 0
     time_decay_count: int = 0
     spread_gate_count: int = 0
+    cooldown_count: int = 0
 
 
-# ══════════════════════════════════════════════
+# ══
 # Log Parser
 # ══════════════════════════════════════════════
 def _parse_timestamp(ts_str: str) -> datetime:
@@ -386,6 +388,9 @@ def parse_logs(log_files: Sequence[Path]) -> DashboardData:
                     continue
                 if _SPREAD_GATE_RE.search(msg):
                     data.spread_gate_count += 1
+                    continue
+                if _COOLDOWN_RE.search(msg):
+                    data.cooldown_count += 1
                     continue
 
     return data
@@ -737,6 +742,7 @@ def display_dashboard(data: DashboardData) -> None:
         + data.phantom_fire_count + data.pyramid_count
         + data.time_decay_count + data.vkr_gate_count
         + data.grace_period_count + data.spread_gate_count
+        + data.cooldown_count
     )
     if v3_total > 0:
         _section("V3.x DEFENSE SYSTEMS")
@@ -748,6 +754,7 @@ def display_dashboard(data: DashboardData) -> None:
         _kv("VKR Gate Blocks", f"{data.vkr_gate_count}")
         _kv("Grace Period Shields", f"{data.grace_period_count}")
         _kv("Spread Gate Skips", f"{data.spread_gate_count}")
+        _kv("Bar Cooldown Blocks", f"{data.cooldown_count}")
 
     # ── Recent Trades (last 10) ──
     if trades:

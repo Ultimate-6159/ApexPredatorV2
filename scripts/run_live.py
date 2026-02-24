@@ -82,7 +82,8 @@ from config import (
     REGIME_SHIFT_GRACE_SEC,
     SYMBOL,
     TIMEFRAME_NAME,
-    TRADE_LIFESPAN_SEC,
+    TRADE_LIFESPAN_NORMAL_SEC,
+    TRADE_LIFESPAN_VOLATILE_SEC,
     TRAILING_ACTIVATION_ATR,
     TRAILING_DRAWDOWN_ATR,
     TRAINING_LOG_DIR,
@@ -280,6 +281,12 @@ class LiveEngine:
 
         # V3.5 — Average tick volume (rolling 50-bar baseline for VKR gate)
         self._avg_tick_volume: float = 0.0
+
+        # V3.7 — Current regime (for regime-aware Time-Decay)
+        self._current_regime: Regime | None = None
+
+        # V3.7 — Anti-Machine Gun Cooldown (bar-level)
+        self._last_trade_closed_bar_time: int = 0
 
         # News filter
         self.news_filter: NewsFilter | None = None
@@ -515,6 +522,9 @@ class LiveEngine:
                         event_title,
                     )
                     regime = Regime.HIGH_VOLATILITY
+
+            # V3.7: Track current regime for Time-Decay
+            self._current_regime = regime
 
             # 6. Regime-shift protocol  (SRS §4 — The Clean Slate)
             self._handle_regime_shift(regime)
@@ -792,11 +802,13 @@ class LiveEngine:
             self.risk.register_close(0.0)
             self._pyramid_ticket = None
             self._swing_extended = False
+            self._last_trade_closed_bar_time = self._last_bar_time  # V3.7
             return True
 
         result = self.executor.close_open_trade(reason)
         if result:
             self._swing_extended = False  # Reset for Elastic Cooldown
+            self._last_trade_closed_bar_time = self._last_bar_time  # V3.7
         return result
 
     # ── Predictive Cache (V3.0 — Smart Phantom Spoofer) ─
@@ -1228,29 +1240,27 @@ class LiveEngine:
             vol_step = sym["volume_step"]
             vol_min = sym["volume_min"]
 
-            volume_to_close = trade.lot * PARTIAL_CLOSE_VOLUME_PCT
-            volume_to_close = math.floor(volume_to_close / vol_step) * vol_step
-            volume_to_close = round(volume_to_close, 2)
-            remaining = round(trade.lot - volume_to_close, 2)
-
-            if volume_to_close >= vol_min and remaining >= vol_min:
-                if self.executor.partial_close(volume_to_close):
-                    self.log.info(
-                        "💰 PARTIAL CLOSE: Secured 50%% profit for Ticket #%d "
-                        "(closed %.2f lots, remaining %.2f lots)",
-                        trade.ticket,
-                        volume_to_close,
-                        remaining,
-                    )
-                    self._partial_close_done = True
+            # V3.7: Spam Filter — skip silently if lot already at minimum
+            if trade.lot <= vol_min:
+                self._partial_close_done = True
             else:
-                self.log.warning(
-                    "Partial close skipped — lot too small "
-                    "(total=%.2f, to_close=%.2f, min=%.2f)",
-                    trade.lot,
-                    volume_to_close,
-                    vol_min,
-                )
+                volume_to_close = trade.lot * PARTIAL_CLOSE_VOLUME_PCT
+                volume_to_close = math.floor(volume_to_close / vol_step) * vol_step
+                volume_to_close = round(volume_to_close, 2)
+                remaining = round(trade.lot - volume_to_close, 2)
+
+                if volume_to_close >= vol_min and remaining >= vol_min:
+                    if self.executor.partial_close(volume_to_close):
+                        self.log.info(
+                            "💰 PARTIAL CLOSE: Secured 50%% profit for Ticket #%d "
+                            "(closed %.2f lots, remaining %.2f lots)",
+                            trade.ticket,
+                            volume_to_close,
+                            remaining,
+                        )
+                        self._partial_close_done = True
+                else:
+                    self._partial_close_done = True  # V3.7: mark done to prevent repeat
 
     # ── Trailing Stop  (ATR-Based Dynamic) ────
     def _check_trailing_stop(self) -> None:
@@ -1326,9 +1336,13 @@ class LiveEngine:
                 self._trailing_ticket = None
                 self._highest_profit_points = 0.0
 
-    # ── V3.0: Virtual Time-Decay Shield ───────────
+    # ── V3.0: Virtual Time-Decay Shield (V3.7: regime-aware) ─
     def _check_time_decay(self) -> None:
-        """Force close if trade exceeds TRADE_LIFESPAN_SEC without reaching break-even.
+        """Force close if trade exceeds lifespan without reaching break-even.
+
+        V3.7: Lifespan adapts to current market regime:
+          - TRENDING_UP / TRENDING_DOWN   → TRADE_LIFESPAN_NORMAL_SEC  (90 s)
+          - HIGH_VOLATILITY / MEAN_REVERTING → TRADE_LIFESPAN_VOLATILE_SEC (300 s)
 
         Virtual SL — computed in Python, fires market close.
         No SL modification spam to broker.
@@ -1341,13 +1355,21 @@ class LiveEngine:
         trade = self.risk.open_trade
         elapsed = (datetime.utcnow() - trade.open_time).total_seconds()
 
-        if elapsed > TRADE_LIFESPAN_SEC:
+        # V3.7: Select lifespan based on current regime
+        regime = self._current_regime or trade.regime
+        if regime in (Regime.HIGH_VOLATILITY, Regime.MEAN_REVERTING):
+            lifespan = TRADE_LIFESPAN_VOLATILE_SEC
+        else:
+            lifespan = TRADE_LIFESPAN_NORMAL_SEC
+
+        if elapsed > lifespan:
             self.log.warning(
                 "⏱️ TIME-DECAY SHIELD: Trade #%d open %.0fs > %ds "
-                "without break-even — FORCE CLOSE",
+                "(%s) without break-even — FORCE CLOSE",
                 trade.ticket,
                 elapsed,
-                TRADE_LIFESPAN_SEC,
+                lifespan,
+                regime.value,
             )
             self._close_and_track("TIME_DECAY")
 
@@ -1528,6 +1550,15 @@ class LiveEngine:
                 self._close_and_track("OPPOSITE_SIGNAL")
                 return
 
+        # V3.7: Anti-Machine Gun Cooldown — no re-entry in same bar
+        if self._last_trade_closed_bar_time == self._last_bar_time:
+            self.log.info(
+                "🔒 COOLDOWN: Waiting for next bar before re-entry "
+                "(bar_time=%d)",
+                self._last_bar_time,
+            )
+            return
+
         # Flat → open new position
         tick = mt5.symbol_info_tick(self.symbol)
         if tick is None:
@@ -1598,6 +1629,7 @@ class LiveEngine:
                 self.risk.register_close(profit)
                 # Elastic Cooldown: reset swing tracking for next entry
                 self._swing_extended = False
+                self._last_trade_closed_bar_time = self._last_bar_time  # V3.7
 
         # --- V3.0: Pyramid ticket sync ---
         if self._pyramid_ticket is not None:

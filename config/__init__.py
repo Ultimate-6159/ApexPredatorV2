@@ -101,8 +101,9 @@ ENABLE_PARTIAL_CLOSE: bool = True
 PARTIAL_CLOSE_ACTIVATION_ATR: float = 1.0  # Close 50% when profit >= 1.0 × ATR
 PARTIAL_CLOSE_VOLUME_PCT: float = 0.5      # Fraction of lot to close (0.5 = 50%)
 
-# V3.0 — Virtual Time-Decay Shield
-TRADE_LIFESPAN_SEC: int = 90             # Force close if not break-even after this many seconds
+# V3.0 — Virtual Time-Decay Shield (V3.7: regime-aware)
+TRADE_LIFESPAN_NORMAL_SEC: int = 90      # TRENDING_UP / TRENDING_DOWN
+TRADE_LIFESPAN_VOLATILE_SEC: int = 300   # HIGH_VOLATILITY / MEAN_REVERTING
 
 # V3.0 — Risk-Free Pyramiding
 ENABLE_PYRAMIDING: bool = True           # Allow 2nd position when 1st is at break-even
