@@ -242,6 +242,10 @@ class LiveEngine:
         self._break_even_done: bool = False
         self._partial_close_done: bool = False
 
+        # Win-Streak Reload state (same-bar re-entry only after TP)
+        self._last_close_bar: int = 0
+        self._last_close_profitable: bool = False
+
         # News filter
         self.news_filter: NewsFilter | None = None
         if NEWS_FILTER_ENABLED:
@@ -380,6 +384,23 @@ class LiveEngine:
             hl_range = (ohlcv["High"] - ohlcv["Low"]).rolling(ATR_PERIOD).mean()
             self._current_atr = float(hl_range.iloc[-1]) if not hl_range.empty else 0.0
 
+            # 3a. Spread/ATR Normalization Gate — skip bar if ATR too small vs spread
+            sym_info = self.perception.get_symbol_info()
+            _point = sym_info["point"]
+            if _point > 0 and self._current_atr > 0:
+                current_atr_points = self._current_atr / _point
+                tick = mt5.symbol_info_tick(self.symbol)
+                if tick is not None:
+                    current_spread_points = (tick.ask - tick.bid) / _point
+                    if current_atr_points < current_spread_points * 1.5:
+                        self.log.info(
+                            "⏸️ SPREAD GATE: ATR=%.0f pts < 1.5×Spread=%.0f pts "
+                            "— skipping bar",
+                            current_atr_points,
+                            current_spread_points,
+                        )
+                        return
+
             # 3b. Profit locking (Break-Even + Partial Close)
             self._check_profit_locking()
 
@@ -419,7 +440,7 @@ class LiveEngine:
             # 8. Time stop check  (SRS §6)
             self.risk.update_bar(self._bar_count)
             if self.risk.should_time_stop(self._bar_count):
-                self.executor.close_open_trade("TIME_STOP")
+                self._close_and_track("TIME_STOP")
 
             # 9. Normalize observation  (SRS §2)
             raw_obs = latest_row.values.astype(np.float32)
@@ -496,8 +517,8 @@ class LiveEngine:
                     prob_str,
                 )
 
-            # 12d. Ribbon Expansion & True Bounce Filter (EMA7 + EMA20)
-            #   Confirms momentum expansion + touch-and-bounce off EMA7
+            # 12d. Live-Tick Precision with Momentum Confirmation (EMA7 + EMA20)
+            #   Uses real-time tick price for bounce confirmation
             if (
                 actual_action in (ACTION_BUY, ACTION_SELL)
                 and regime in (Regime.TRENDING_UP, Regime.TRENDING_DOWN)
@@ -505,8 +526,6 @@ class LiveEngine:
                 and len(ohlcv) >= 20
             ):
                 close_series = ohlcv["Close"]
-                current_close = float(close_series.iloc[-1])
-                current_open = float(ohlcv["Open"].iloc[-1])
                 current_high = float(ohlcv["High"].iloc[-1])
                 current_low = float(ohlcv["Low"].iloc[-1])
                 current_ema7 = float(
@@ -518,17 +537,20 @@ class LiveEngine:
                 ribbon_gap = abs(current_ema7 - current_ema20)
                 rsi_fast_val = float(latest_row.get("rsi_fast", 50.0))
 
+                # Live tick price for real-time bounce confirmation
+                _tick = mt5.symbol_info_tick(self.symbol)
+                tick_price = float(_tick.bid) if _tick is not None else float(close_series.iloc[-1])
+
                 if actual_action == ACTION_BUY and regime == Regime.TRENDING_UP:
                     ribbon_ok = (
                         current_ema7 > current_ema20
-                        and ribbon_gap >= 0.3 * self._current_atr
-                        and current_low <= current_ema7
-                        and current_close > current_open
-                        and current_close > current_ema7
+                        and ribbon_gap >= 0.1 * self._current_atr
+                        and current_low <= current_ema7 + 0.2 * self._current_atr
+                        and tick_price > current_ema7
                     )
-                    if rsi_fast_val >= 80.0:
+                    if rsi_fast_val >= 85.0:
                         self.log.info(
-                            "🚨 RSI FILTER: BUY blocked (RSI=%.1f >= 80)",
+                            "🚨 RSI FILTER: BUY blocked (RSI=%.1f >= 85)",
                             rsi_fast_val,
                         )
                         actual_action = ACTION_HOLD
@@ -536,13 +558,12 @@ class LiveEngine:
                         self.log.info(
                             "⏳ RIBBON: BUY deferred "
                             "(EMA7=%.2f, EMA20=%.2f, gap=%.2f, "
-                            "low=%.2f, close=%.2f, open=%.2f, ATR=%.2f)",
+                            "low=%.2f, tick=%.2f, ATR=%.2f)",
                             current_ema7,
                             current_ema20,
                             ribbon_gap,
                             current_low,
-                            current_close,
-                            current_open,
+                            tick_price,
                             self._current_atr,
                         )
                         actual_action = ACTION_HOLD
@@ -550,14 +571,13 @@ class LiveEngine:
                 elif actual_action == ACTION_SELL and regime == Regime.TRENDING_DOWN:
                     ribbon_ok = (
                         current_ema7 < current_ema20
-                        and ribbon_gap >= 0.3 * self._current_atr
-                        and current_high >= current_ema7
-                        and current_close < current_open
-                        and current_close < current_ema7
+                        and ribbon_gap >= 0.1 * self._current_atr
+                        and current_high >= current_ema7 - 0.2 * self._current_atr
+                        and tick_price < current_ema7
                     )
-                    if rsi_fast_val <= 20.0:
+                    if rsi_fast_val <= 15.0:
                         self.log.info(
-                            "🚨 RSI FILTER: SELL blocked (RSI=%.1f <= 20)",
+                            "🚨 RSI FILTER: SELL blocked (RSI=%.1f <= 15)",
                             rsi_fast_val,
                         )
                         actual_action = ACTION_HOLD
@@ -565,16 +585,27 @@ class LiveEngine:
                         self.log.info(
                             "⏳ RIBBON: SELL deferred "
                             "(EMA7=%.2f, EMA20=%.2f, gap=%.2f, "
-                            "high=%.2f, close=%.2f, open=%.2f, ATR=%.2f)",
+                            "high=%.2f, tick=%.2f, ATR=%.2f)",
                             current_ema7,
                             current_ema20,
                             ribbon_gap,
                             current_high,
-                            current_close,
-                            current_open,
+                            tick_price,
                             self._current_atr,
                         )
                         actual_action = ACTION_HOLD
+
+            # 12e. Win-Streak Reload guard — same-bar re-entry only after TP
+            if (
+                actual_action in (ACTION_BUY, ACTION_SELL)
+                and not self.risk.has_open_trade
+                and self._last_close_bar == self._bar_count
+                and not self._last_close_profitable
+            ):
+                self.log.info(
+                    "🔒 WIN-STREAK: Re-entry blocked (last close on this bar was loss/BE)"
+                )
+                actual_action = ACTION_HOLD
 
             # 13. Dispatch with position-aware logic  (SRS §5 + §6)
             self._dispatch_action(actual_action, regime, ohlcv, equity)
@@ -594,6 +625,28 @@ class LiveEngine:
 
         except Exception:
             self.log.exception("Error processing bar #%d", self._bar_count)
+
+    # ── Close with Win-Streak tracking ────────
+    def _close_and_track(self, reason: str) -> bool:
+        """Close trade and update Win-Streak Reload state."""
+        trade = self.risk.open_trade
+        if trade is None:
+            return False
+
+        # Estimate PnL direction before closing
+        tick = mt5.symbol_info_tick(self.symbol)
+        pnl_positive = False
+        if tick is not None:
+            if trade.direction == "BUY":
+                pnl_positive = tick.bid > trade.entry_price
+            else:
+                pnl_positive = trade.entry_price > tick.ask
+
+        result = self.executor.close_open_trade(reason)
+        if result:
+            self._last_close_bar = self._bar_count
+            self._last_close_profitable = pnl_positive
+        return result
 
     # ── Profit Locking  (Break-Even + Partial Close) ─
     def _check_profit_locking(self) -> None:
@@ -756,7 +809,7 @@ class LiveEngine:
                     drawdown_pts,
                     drawdown_pts_threshold,
                 )
-                self.executor.close_open_trade("TRAILING_STOP")
+                self._close_and_track("TRAILING_STOP")
                 self._trailing_ticket = None
                 self._highest_profit_points = 0.0
 
@@ -774,7 +827,7 @@ class LiveEngine:
                     "Force closing trade #%d (Clean Slate protocol)",
                     self.risk.open_trade.ticket,
                 )
-                self.executor.close_open_trade("REGIME_SHIFT")
+                self._close_and_track("REGIME_SHIFT")
 
         self._prev_regime = current_regime
 
@@ -888,6 +941,9 @@ class LiveEngine:
                 profit,
             )
             self.risk.register_close(profit)
+            # Win-Streak Reload: record whether this close was profitable
+            self._last_close_bar = self._bar_count
+            self._last_close_profitable = profit > 0
 
     def _get_closed_trade_profit(
         self, ticket: int, open_time: datetime

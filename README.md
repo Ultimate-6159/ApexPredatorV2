@@ -154,8 +154,10 @@ Each agent is a PPO model trained in a custom Gymnasium environment with regime-
 | **Anti-Martingale** | Max 1 position | Never adds to a losing position |
 | **Slippage Protection** | 30 points | Dynamic filling mode + deviation cap |
 | **Confidence Gate** | 65% | Force HOLD if AI is uncertain |
-| **Ribbon Expansion** | EMA7 + EMA20 | True Bounce: gap ≥ 0.3×ATR + touch EMA7 + bullish/bearish close |
-| **RSI Anti-Chasing** | RSI(7) 20–80 | Block BUY if RSI≥80, block SELL if RSI≤20 |
+| **Spread Gate** | ATR > 1.5×Spread | Skip bar if volatility too low for spread |
+| **Live-Tick Precision** | EMA7 + EMA20 | Real-time tick bounce: gap ≥ 0.1×ATR + tick above/below EMA7 |
+| **RSI Anti-Chasing** | RSI(7) 15–85 | Block BUY if RSI≥85, block SELL if RSI≤15 |
+| **Win-Streak Reload** | Same-bar re-entry | Re-enter same bar only if previous trade was profitable |
 
 ---
 
@@ -223,6 +225,7 @@ The `LiveEngine` fires once per bar close and executes a **15-step pipeline**:
  1.  Sync position state with broker (detect TP/SL hits)
  2.  Fetch fresh OHLCV + compute features
  3.  Compute & store ATR (used by profit locking + dispatch)
+ 3a. Spread/ATR Normalization Gate — skip bar if ATR < 1.5×Spread
  3b. Profit locking check (Break-Even + Partial Close)
  4.  ATR trailing stop check (overrides AI)
  5.  Detect regime (Meta-Router)
@@ -238,6 +241,8 @@ The `LiveEngine` fires once per bar close and executes a **15-step pipeline**:
 12.  Map to actual action (regime-specific action space)
 12c. Confidence gate — force HOLD if confidence < 65%
 12b. Log telemetry (confidence %, critic value, per-action probs)
+12d. Live-Tick Precision — EMA7/EMA20 + real-time tick bounce confirmation
+12e. Win-Streak Reload — block same-bar re-entry after loss/BE
 13.  Dispatch with position-aware logic (Anti-Martingale)
 14.  Log bar result
 ```
