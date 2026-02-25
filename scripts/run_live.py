@@ -77,6 +77,8 @@ from config import (
     ENABLE_PARTIAL_CLOSE,
     ENABLE_PYRAMIDING,
     EQUITY_JUMP_PCT,
+    HTF_CACHE_BARS,
+    HTF_CONFLUENCE_ENABLED,
     LIMIT_ORDER_ENABLED,
     LIMIT_ORDER_EXPIRY_SEC,
     MAGIC_NUMBER,
@@ -392,6 +394,10 @@ class LiveEngine:
                 cache_hours=NEWS_CACHE_HOURS,
             )
 
+        # V7.0 — Multi-Timeframe Confluence
+        self._htf_bias: int = 0
+        self._htf_last_update_bar: int = 0
+
     # ── Public Entry Point ────────────────────
     def start(self) -> None:
         """Initialize everything and enter the main loop."""
@@ -604,9 +610,14 @@ class LiveEngine:
             # V5.2: Cache ADX for sub-bar elastic TP
             self._cached_adx = float(latest_row.get("adx", 0.0))
 
-            # 3. Compute & store ATR (used by trailing stop + dispatch)
-            hl_range = (ohlcv["High"] - ohlcv["Low"]).rolling(ATR_PERIOD).mean()
-            self._current_atr = float(hl_range.iloc[-1]) if not hl_range.empty else 0.0
+            # 3. Get True ATR from streaming indicators (V7.0: fixes SL/TP accuracy)
+            #    Previous code used (H-L).rolling(ATR_PERIOD).mean() which ignores
+            #    gap moves and systematically underestimates volatility.
+            self._current_atr = self.perception.current_atr
+            if self._current_atr <= 0:
+                # Fallback: simple HL range (should never trigger after warm-up)
+                hl_range = (ohlcv["High"] - ohlcv["Low"]).rolling(ATR_PERIOD).mean()
+                self._current_atr = float(hl_range.iloc[-1]) if not hl_range.empty else 0.0
 
             # 3d. Compute average tick volume (V4.0: configurable period, default 10-bar)
             if "Volume" in ohlcv.columns and len(ohlcv) >= VOLUME_SMA_PERIOD:
@@ -662,6 +673,21 @@ class LiveEngine:
 
             # V3.7: Track current regime for Time-Decay
             self._current_regime = regime
+
+            # V7.0: Multi-Timeframe Confluence — refresh H1 trend bias
+            if HTF_CONFLUENCE_ENABLED:
+                if (
+                    self._bar_count - self._htf_last_update_bar >= HTF_CACHE_BARS
+                    or self._htf_bias == 0
+                ):
+                    self._htf_bias = self.perception.get_htf_trend_bias()
+                    self._htf_last_update_bar = self._bar_count
+                    if self._htf_bias != 0:
+                        self.log.info(
+                            "📈 HTF BIAS: H1 trend = %s (EMA%d)",
+                            "BULLISH" if self._htf_bias > 0 else "BEARISH",
+                            50,
+                        )
 
             # 6. Regime-shift protocol  (SRS §4 — The Clean Slate)
             self._handle_regime_shift(regime)
@@ -1235,11 +1261,8 @@ class LiveEngine:
             features = self.perception.compute_features(ohlcv)
             latest_row = features.iloc[-1]
 
-            # ATR
-            hl_range = (ohlcv["High"] - ohlcv["Low"]).rolling(ATR_PERIOD).mean()
-            self._current_atr = (
-                float(hl_range.iloc[-1]) if not hl_range.empty else 0.0
-            )
+            # ATR (V7.0: True ATR from streaming indicators)
+            self._current_atr = self.perception.current_atr
             if self._current_atr <= 0 or len(ohlcv) < 20:
                 return False
 
@@ -2078,6 +2101,19 @@ class LiveEngine:
                 self._last_bar_time,
             )
             return
+
+        # V7.0: Multi-Timeframe Confluence Gate — block entries against H1 trend
+        if HTF_CONFLUENCE_ENABLED and self._htf_bias != 0:
+            if direction == "BUY" and self._htf_bias < 0:
+                self.log.info(
+                    "📉 HTF GATE: BUY blocked — H1 trend is BEARISH"
+                )
+                return
+            if direction == "SELL" and self._htf_bias > 0:
+                self.log.info(
+                    "📈 HTF GATE: SELL blocked — H1 trend is BULLISH"
+                )
+                return
 
         # V4.0: Penalty Box — block direction that lost consecutively
         if time.time() < self._penalty_box_until.get(direction, 0.0):

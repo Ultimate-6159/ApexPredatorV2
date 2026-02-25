@@ -22,6 +22,7 @@ from config import (
     BB_STD,
     EMA_FAST,
     EMA_SLOW,
+    HTF_TREND_EMA_PERIOD,
     LOOKBACK_BARS,
     RSI_FAST_PERIOD,
     RSI_SLOW_PERIOD,
@@ -454,6 +455,12 @@ class StreamingIndicators:
 
         return pd.DataFrame([feat], index=[df.index[-1]])
 
+    # ── V7.0: Expose Raw ATR ──────────────────
+    @property
+    def last_atr(self) -> float:
+        """Return the last computed raw ATR value (Wilder smoothing)."""
+        return self._atr_val
+
 
 class PerceptionEngine:
     """Connects to MT5 and produces a feature DataFrame."""
@@ -464,6 +471,17 @@ class PerceptionEngine:
         self.timeframe = _TF_MAP.get(timeframe, mt5.TIMEFRAME_M5)
         self._connected = False
         self._streaming = StreamingIndicators()  # V6.0
+
+    # ── V7.0: True ATR Accessor ───────────────────
+    @property
+    def current_atr(self) -> float:
+        """Return the current raw ATR from streaming indicators.
+
+        This is the proper Wilder-smoothed True Range, NOT the simple
+        (High-Low) average that was previously used.  Fixes SL/TP
+        accuracy for all ATR-dependent calculations.
+        """
+        return self._streaming.last_atr
 
     # ── MT5 Connection ────────────────────────────
     def connect(self) -> bool:
@@ -535,6 +553,38 @@ class PerceptionEngine:
         (rows with NaN from warm-up periods are dropped).
         """
         return self._streaming.compute(df)
+
+    # ── V7.0: Multi-Timeframe Confluence ──────────
+    def get_htf_trend_bias(self) -> int:
+        """Return higher-timeframe (H1) trend direction.
+
+        Computes EMA on H1 close prices to determine overall trend:
+          +1 = bullish (price > H1 EMA)
+          -1 = bearish (price < H1 EMA)
+           0 = neutral / insufficient data
+        """
+        try:
+            n_bars = HTF_TREND_EMA_PERIOD + 5
+            rates = mt5.copy_rates_from_pos(
+                self.symbol, mt5.TIMEFRAME_H1, 0, n_bars,
+            )
+            if rates is None or len(rates) < HTF_TREND_EMA_PERIOD:
+                return 0
+
+            closes = rates["close"].astype(np.float64)
+            # EMA (alpha = 2 / (period + 1), adjust=False)
+            k = 2.0 / (HTF_TREND_EMA_PERIOD + 1)
+            ema = float(closes[0])
+            for i in range(1, len(closes)):
+                ema = float(closes[i]) * k + ema * (1 - k)
+
+            if float(closes[-1]) > ema:
+                return 1
+            elif float(closes[-1]) < ema:
+                return -1
+        except Exception:
+            logger.debug("HTF trend bias calculation failed", exc_info=True)
+        return 0
 
     # ── Convenience ───────────────────────────────
     def get_latest_features(self, bars: int = LOOKBACK_BARS) -> pd.DataFrame:

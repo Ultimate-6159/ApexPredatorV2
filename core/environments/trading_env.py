@@ -25,6 +25,7 @@ from config import (
     ATR_TP_MULTIPLIER,
     MAX_HOLDING_BARS,
     RISK_PER_TRADE_PCT,
+    SPREAD_ATR_FRACTION,
     Regime,
 )
 
@@ -284,22 +285,24 @@ class TradingEnv(gym.Env):
         self._bars_since_close += 1
 
         if action == ACTION_BUY:
+            half_spread = atr * SPREAD_ATR_FRACTION * 0.5  # V7.0: spread cost
             self._position = 1
-            self._entry_price = price
+            self._entry_price = price + half_spread  # V7.0: enter at ask (worse price)
             self._entry_atr = atr
             self._hold_counter = 0
-            self._sl = price - atr * self.sl_mult
-            self._tp = price + atr * self.tp_mult
+            self._sl = self._entry_price - atr * self.sl_mult
+            self._tp = self._entry_price + atr * self.tp_mult
             reward = self.entry_cost
             if self._bars_since_close <= self.cooldown_bars:
                 reward += _COOLDOWN_PENALTY
         elif action == ACTION_SELL:
+            half_spread = atr * SPREAD_ATR_FRACTION * 0.5  # V7.0: spread cost
             self._position = -1
-            self._entry_price = price
+            self._entry_price = price - half_spread  # V7.0: enter at bid (worse price)
             self._entry_atr = atr
             self._hold_counter = 0
-            self._sl = price + atr * self.sl_mult
-            self._tp = price - atr * self.tp_mult
+            self._sl = self._entry_price + atr * self.sl_mult
+            self._tp = self._entry_price - atr * self.tp_mult
             reward = self.entry_cost
             if self._bars_since_close <= self.cooldown_bars:
                 reward += _COOLDOWN_PENALTY

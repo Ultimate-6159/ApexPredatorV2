@@ -75,7 +75,7 @@ MAX_HOLDING_BARS: dict[Regime, int] = {
 # ──────────────────────────────────────────────
 # Execution
 # ──────────────────────────────────────────────
-SLIPPAGE_POINTS: int = 35
+SLIPPAGE_POINTS: int = 15                # V7.0: tightened from 35 (saves ~2 pips per trade)
 MAGIC_NUMBER: int = 615900
 ORDER_COMMENT: str = "ApexV2"
 
@@ -152,11 +152,17 @@ EQUITY_JUMP_PCT: float = 0.5             # Force AI re-eval when equity jumps by
 DOM_IMBALANCE_THRESHOLD: float = 3.0     # Block entry when opposite DOM volume > this × our volume
 ADAPTIVE_NORM_ALPHA: float = 0.05        # EMA learning rate for adaptive observation normalization
 
+# V7.0 — The Precision Predator Patch
+HTF_CONFLUENCE_ENABLED: bool = True       # Block entries against H1 trend direction
+HTF_TREND_EMA_PERIOD: int = 50            # H1 EMA period for trend bias detection
+HTF_CACHE_BARS: int = 12                  # Refresh H1 trend every 12 M5 bars (1 hour)
+SPREAD_ATR_FRACTION: float = 0.10         # Training spread simulation: 10% of ATR round-trip
+
 # Inference Safety Guards
 OBS_CLIP_RANGE: float = 10.0             # Hard clip Z-Score features to ± this value
-CONFIDENCE_GATE_PCT: dict[Regime, float] = {   # V5.2: Regime-aware (2-action=55%, 3-action=65%)
-    Regime.TRENDING_UP:     55.0,               # 2-action agent: random baseline 50%
-    Regime.TRENDING_DOWN:   55.0,               # 2-action agent: random baseline 50%
+CONFIDENCE_GATE_PCT: dict[Regime, float] = {   # V7.0: Regime-aware (2-action=60%, 3-action=65%)
+    Regime.TRENDING_UP:     60.0,               # 2-action agent: random baseline 50% (V7.0: raised from 55%)
+    Regime.TRENDING_DOWN:   60.0,               # 2-action agent: random baseline 50% (V7.0: raised from 55%)
     Regime.MEAN_REVERTING:  65.0,               # 3-action agent: random baseline 33%
     Regime.HIGH_VOLATILITY: 65.0,               # 3-action agent: random baseline 33%
 }

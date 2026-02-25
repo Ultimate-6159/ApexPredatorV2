@@ -110,6 +110,9 @@ _SUBBAR_SCAN_RE = re.compile(r"NEW BAR: Cancelled (\d+) stale limit")
 _SPREAD_FILTER_RE = re.compile(r"SPREAD FILTER: (\w+) blocked")
 _MODIFY_THROTTLE_RE = re.compile(r"MODIFY THROTTLE")
 
+# V7.0 Precision Predator patterns
+_HTF_GATE_RE = re.compile(r"HTF GATE: (\w+) blocked")
+
 
 # ══════════════════════════════════════════════
 # Data Structures
@@ -170,6 +173,8 @@ class DashboardData:
     stale_limit_cancelled_count: int = 0
     # V5.1 HFT optimization
     spread_filter_count: int = 0
+    # V7.0 Precision Predator
+    htf_gate_count: int = 0
 
 
 # ══
@@ -453,6 +458,11 @@ def parse_logs(log_files: Sequence[Path]) -> DashboardData:
                     data.spread_filter_count += 1
                     continue
 
+                # ── V7.0 Precision Predator ──
+                if _HTF_GATE_RE.search(msg):
+                    data.htf_gate_count += 1
+                    continue
+
     return data
 
 
@@ -622,7 +632,7 @@ def display_dashboard(data: DashboardData) -> None:
     exp = _expectancy(trades)
 
     # ── Header ──
-    _header("APEX PREDATOR V5.2 — LIVE PERFORMANCE DASHBOARD")
+    _header("APEX PREDATOR V7.0 — LIVE PERFORMANCE DASHBOARD")
 
     if data.balance_series:
         first_ts = data.balance_series[0][0].strftime("%Y-%m-%d %H:%M")
@@ -807,9 +817,10 @@ def display_dashboard(data: DashboardData) -> None:
         + data.limit_order_placed_count + data.limit_order_filled_count
         + data.limit_order_expired_count + data.elastic_tp_count
         + data.spread_filter_count
+        + data.htf_gate_count
     )
     if v3_total > 0:
-        _section("V3.x / V4.0 / V5.0-V5.2 DEFENSE & HFT SYSTEMS")
+        _section("V3.x / V4.0 / V5.0-V5.2 / V7.0 DEFENSE & HFT SYSTEMS")
         _kv("Break-Even Activations", f"{data.break_even_count}")
         _kv("Partial Closes (50%)", f"{data.partial_close_count}")
         _kv("Phantom Spoofer Fires", f"{data.phantom_fire_count}")
@@ -829,6 +840,8 @@ def display_dashboard(data: DashboardData) -> None:
         _kv("Elastic TP Expansions", f"{data.elastic_tp_count}")
         _kv("Stale Limits Cancelled", f"{data.stale_limit_cancelled_count}")
         _kv("Spread Filter Blocks", f"{data.spread_filter_count}")
+        # V7.0
+        _kv("HTF Gate Blocks", f"{data.htf_gate_count}")
 
     # ── Recent Trades (last 10) ──
     if trades:
@@ -879,7 +892,7 @@ def export_csv(trades: Sequence[Trade], path: str) -> None:
 # ══════════════════════════════════════════════
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Apex Predator V3.5 — Live Performance Dashboard",
+        description="Apex Predator V7.0 — Live Performance Dashboard",
     )
     parser.add_argument(
         "--date",
