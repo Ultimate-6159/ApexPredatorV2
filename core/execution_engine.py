@@ -6,7 +6,7 @@ Converts agent actions into real MT5 orders with SL/TP.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import MetaTrader5 as mt5
 
@@ -15,6 +15,7 @@ from config import (
     ACTION_HOLD,
     ACTION_SELL,
     AGENT_ACTION_MAP,
+    LIMIT_ORDER_EXPIRY_SEC,
     MAGIC_NUMBER,
     ORDER_COMMENT,
     SLIPPAGE_POINTS,
@@ -259,6 +260,42 @@ class ExecutionEngine:
         self.risk.update_sl(new_sl)
         return True
 
+    # ── Modify TP (Elastic TP Expansion) ─────────
+    def modify_tp(self, new_tp: float) -> bool:
+        """Move the TP of the current position (e.g. elastic TP expansion)."""
+        trade = self.risk.open_trade
+        if trade is None:
+            return False
+
+        # Sync position ticket from broker
+        actual_ticket = trade.ticket
+        positions = mt5.positions_get(symbol=self.symbol)
+        if positions:
+            for pos in positions:
+                if pos.magic == MAGIC_NUMBER:
+                    actual_ticket = pos.ticket
+                    break
+
+        request = {
+            "action": mt5.TRADE_ACTION_SLTP,
+            "symbol": self.symbol,
+            "position": actual_ticket,
+            "sl": trade.sl,
+            "tp": new_tp,
+        }
+
+        result = mt5.order_send(request)
+        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            logger.error(
+                "Modify TP FAILED (retcode=%s): %s",
+                result.retcode if result else "None",
+                result,
+            )
+            return False
+
+        self.risk.update_tp(new_tp)
+        return True
+
     # ── Partial Close (Scale-Out) ────────────────
     def partial_close(self, volume_to_close: float) -> bool:
         """Close a portion of the open position."""
@@ -484,3 +521,108 @@ class ExecutionEngine:
                 logger.error("Failed to close #%d (%s): %s", pos.ticket, reason, result)
 
         return closed
+
+    # ── V5.0: Limit Order Spoofer ────────────────────
+    def place_limit_order(
+        self,
+        direction: str,
+        limit_price: float,
+        regime: Regime,
+        atr: float,
+        point: float,
+        equity: float,
+        tick_value: float,
+        tick_size: float,
+        volume_min: float,
+        volume_max: float,
+        volume_step: float,
+    ) -> int | None:
+        """Place a Limit Order at *limit_price* with auto-expiry.
+
+        Returns the pending order ticket on success, or None on failure.
+        The order expires after LIMIT_ORDER_EXPIRY_SEC (one M5 bar).
+        """
+        sl, tp = self.risk.calculate_sl_tp(direction, limit_price, atr, regime, point)
+        sl_distance = abs(limit_price - sl)
+        lot = self.risk.calculate_lot_size(
+            equity, sl_distance, tick_value, tick_size,
+            volume_min, volume_max, volume_step, point,
+        )
+
+        order_type = (
+            mt5.ORDER_TYPE_BUY_LIMIT
+            if direction == "BUY"
+            else mt5.ORDER_TYPE_SELL_LIMIT
+        )
+
+        expiry_time = datetime.utcnow() + timedelta(seconds=LIMIT_ORDER_EXPIRY_SEC)
+
+        request = {
+            "action": mt5.TRADE_ACTION_PENDING,
+            "symbol": self.symbol,
+            "volume": lot,
+            "type": order_type,
+            "price": limit_price,
+            "sl": sl,
+            "tp": tp,
+            "magic": MAGIC_NUMBER,
+            "comment": f"{ORDER_COMMENT}_LIMIT",
+            "type_time": mt5.ORDER_TIME_SPECIFIED,
+            "expiration": int(expiry_time.timestamp()),
+            "type_filling": self._get_filling_type(),
+        }
+
+        result = mt5.order_send(request)
+
+        # Fallback: if ORDER_TIME_SPECIFIED not supported, use GTC
+        if result is not None and result.retcode in (10013, 10030):
+            logger.warning(
+                "Limit order TIME_SPECIFIED rejected (retcode=%d) — "
+                "falling back to GTC",
+                result.retcode,
+            )
+            request["type_time"] = mt5.ORDER_TIME_GTC
+            request.pop("expiration", None)
+            result = mt5.order_send(request)
+
+        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            logger.error("Limit order FAILED: %s", result)
+            return None
+
+        ticket = result.order
+        logger.info(
+            "📌 LIMIT ORDER PLACED: ticket=%d  %s_LIMIT %.2f @ %.5f  "
+            "SL=%.5f TP=%.5f (expires %ds)",
+            ticket,
+            direction,
+            lot,
+            limit_price,
+            sl,
+            tp,
+            LIMIT_ORDER_EXPIRY_SEC,
+        )
+        return ticket
+
+    def cancel_pending_orders(self) -> int:
+        """Cancel all MAGIC_NUMBER pending orders on this symbol. Returns count."""
+        orders = mt5.orders_get(symbol=self.symbol)
+        if not orders:
+            return 0
+
+        cancelled = 0
+        for order in orders:
+            if order.magic != MAGIC_NUMBER:
+                continue
+            request = {
+                "action": mt5.TRADE_ACTION_REMOVE,
+                "order": order.ticket,
+            }
+            result = mt5.order_send(request)
+            if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
+                logger.info("❌ LIMIT ORDER CANCELLED: ticket=%d", order.ticket)
+                cancelled += 1
+            else:
+                logger.error(
+                    "Failed to cancel pending #%d: %s", order.ticket, result
+                )
+        return cancelled

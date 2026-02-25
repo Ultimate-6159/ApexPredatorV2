@@ -175,6 +175,11 @@ class RiskManager:
         if self._open_trade is not None:
             self._open_trade.sl = new_sl
 
+    def update_tp(self, new_tp: float) -> None:
+        """Update tracked TP after modification (e.g. elastic TP expansion)."""
+        if self._open_trade is not None:
+            self._open_trade.tp = new_tp
+
     def update_lot(self, new_lot: float) -> None:
         """Update tracked lot after partial close."""
         if self._open_trade is not None:

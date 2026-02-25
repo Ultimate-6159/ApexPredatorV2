@@ -99,6 +99,13 @@ _COOLDOWN_RE = re.compile(r"COOLDOWN: Waiting for next bar")
 _PENALTY_BOX_RE = re.compile(r"PENALTY BOX: (\w+) (locked|blocked)")
 _VOLUME_GATE_RE = re.compile(r"VOLUME GATE: (\w+) rejected")
 
+# V5.0 HFT system patterns
+_LIMIT_ORDER_PLACED_RE = re.compile(r"LIMIT SPOOFER: (\w+)_LIMIT placed")
+_LIMIT_ORDER_FILLED_RE = re.compile(r"LIMIT ORDER FILLED: ticket=(\d+)")
+_LIMIT_ORDER_EXPIRED_RE = re.compile(r"LIMIT ORDER EXPIRED/CANCELLED: ticket=(\d+)")
+_ELASTIC_TP_RE = re.compile(r"ELASTIC TP EXPANSION #(\d+)")
+_SUBBAR_SCAN_RE = re.compile(r"NEW BAR: Cancelled (\d+) stale limit")
+
 
 # ══════════════════════════════════════════════
 # Data Structures
@@ -151,6 +158,12 @@ class DashboardData:
     penalty_box_count: int = 0
     volume_gate_count: int = 0
     time_decay_squeeze_count: int = 0
+    # V5.0 HFT systems
+    limit_order_placed_count: int = 0
+    limit_order_filled_count: int = 0
+    limit_order_expired_count: int = 0
+    elastic_tp_count: int = 0
+    stale_limit_cancelled_count: int = 0
 
 
 # ══
@@ -412,6 +425,23 @@ def parse_logs(log_files: Sequence[Path]) -> DashboardData:
                     data.volume_gate_count += 1
                     continue
 
+                # ── V5.0 HFT systems ──
+                if _LIMIT_ORDER_PLACED_RE.search(msg):
+                    data.limit_order_placed_count += 1
+                    continue
+                if _LIMIT_ORDER_FILLED_RE.search(msg):
+                    data.limit_order_filled_count += 1
+                    continue
+                if _LIMIT_ORDER_EXPIRED_RE.search(msg):
+                    data.limit_order_expired_count += 1
+                    continue
+                if _ELASTIC_TP_RE.search(msg):
+                    data.elastic_tp_count += 1
+                    continue
+                if _SUBBAR_SCAN_RE.search(msg):
+                    data.stale_limit_cancelled_count += 1
+                    continue
+
     return data
 
 
@@ -581,7 +611,7 @@ def display_dashboard(data: DashboardData) -> None:
     exp = _expectancy(trades)
 
     # ── Header ──
-    _header("APEX PREDATOR V4.0 — LIVE PERFORMANCE DASHBOARD")
+    _header("APEX PREDATOR V5.0 — LIVE PERFORMANCE DASHBOARD")
 
     if data.balance_series:
         first_ts = data.balance_series[0][0].strftime("%Y-%m-%d %H:%M")
@@ -763,9 +793,11 @@ def display_dashboard(data: DashboardData) -> None:
         + data.grace_period_count + data.spread_gate_count
         + data.cooldown_count + data.penalty_box_count
         + data.volume_gate_count
+        + data.limit_order_placed_count + data.limit_order_filled_count
+        + data.limit_order_expired_count + data.elastic_tp_count
     )
     if v3_total > 0:
-        _section("V3.x / V4.0 DEFENSE SYSTEMS")
+        _section("V3.x / V4.0 / V5.0 DEFENSE & HFT SYSTEMS")
         _kv("Break-Even Activations", f"{data.break_even_count}")
         _kv("Partial Closes (50%)", f"{data.partial_close_count}")
         _kv("Phantom Spoofer Fires", f"{data.phantom_fire_count}")
@@ -778,6 +810,12 @@ def display_dashboard(data: DashboardData) -> None:
         _kv("Bar Cooldown Blocks", f"{data.cooldown_count}")
         _kv("Penalty Box Lockouts", f"{data.penalty_box_count}")
         _kv("Volume Gate Rejects", f"{data.volume_gate_count}")
+        # V5.0 HFT
+        _kv("Limit Orders Placed", f"{data.limit_order_placed_count}")
+        _kv("  └─ Filled (0 slip)", f"{data.limit_order_filled_count}")
+        _kv("  └─ Expired/Cancelled", f"{data.limit_order_expired_count}")
+        _kv("Elastic TP Expansions", f"{data.elastic_tp_count}")
+        _kv("Stale Limits Cancelled", f"{data.stale_limit_cancelled_count}")
 
     # ── Recent Trades (last 10) ──
     if trades:

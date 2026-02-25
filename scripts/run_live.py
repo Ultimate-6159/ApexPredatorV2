@@ -63,9 +63,13 @@ from config import (
     BREAK_EVEN_ACTIVATION_ATR,
     BREAK_EVEN_BUFFER_POINTS,
     CONFIDENCE_GATE_PCT,
+    DYNAMIC_TP_ACTIVATION_ADX,
+    DYNAMIC_TP_ENABLED,
     ENABLE_BREAK_EVEN,
     ENABLE_PARTIAL_CLOSE,
     ENABLE_PYRAMIDING,
+    LIMIT_ORDER_ENABLED,
+    LIMIT_ORDER_EXPIRY_SEC,
     MAGIC_NUMBER,
     MAX_CONSECUTIVE_LOSSES_DIR,
     MAX_POSITIONS,
@@ -82,9 +86,13 @@ from config import (
     PENALTY_BOX_MINUTES,
     PHANTOM_SWEEP_ATR,
     REGIME_SHIFT_GRACE_SEC,
+    SUBBAR_RATE_LIMIT_SEC,
+    SUBBAR_TICK_INTERVAL,
     SYMBOL,
     TIME_DECAY_SL_BUMP_RATIO,
     TIMEFRAME_NAME,
+    TP_EXPANSION_MULTIPLIER,
+    TP_MAX_EXPANSIONS,
     TRADE_LIFESPAN_NORMAL_SEC,
     TRADE_LIFESPAN_VOLATILE_SEC,
     TRAILING_ACTIVATION_ATR,
@@ -300,6 +308,17 @@ class LiveEngine:
         # V4.0 — Time-Decay SL squeeze flag (prevent repeated modifications)
         self._time_decay_squeezed: bool = False
 
+        # V5.0 — Pending Limit Order tracking
+        self._pending_limit_ticket: int | None = None
+
+        # V5.0 — Sub-Bar Tick Counter for async re-evaluation
+        self._subbar_tick_count: int = 0
+        self._last_subbar_scan_time: float = 0.0
+
+        # V5.0 — Dynamic Elastic TP state
+        self._tp_expansions: int = 0
+        self._last_adx: float = 0.0
+
         # News filter
         self.news_filter: NewsFilter | None = None
         if NEWS_FILTER_ENABLED:
@@ -384,6 +403,10 @@ class LiveEngine:
                runs every 50 ms while a position is open or cache is active.
                HFT Re-entry: if a position closes intra-bar, force an
                immediate AI re-evaluation by returning True.
+
+        V5.0:  Sub-Bar Tick Counter — every SUBBAR_TICK_INTERVAL ticks,
+               run a lightweight sub-bar scan (Elastic TP + pending order
+               management) with rate limiting at SUBBAR_RATE_LIMIT_SEC.
         """
         while True:
             if not self._check_connection():
@@ -400,6 +423,15 @@ class LiveEngine:
             _tick = mt5.symbol_info_tick(self.symbol)
             if _tick is not None:
                 self._record_tick(float(_tick.bid))
+
+                # V5.0: Sub-Bar Tick Counter
+                self._subbar_tick_count += 1
+                if self._subbar_tick_count >= SUBBAR_TICK_INTERVAL:
+                    self._subbar_tick_count = 0
+                    now = time.time()
+                    if now - self._last_subbar_scan_time >= SUBBAR_RATE_LIMIT_SEC:
+                        self._last_subbar_scan_time = now
+                        self._subbar_scan()
 
             # HFT Re-entry: position just closed intra-bar → force AI now
             if was_open and not self.risk.has_open_trade:
@@ -421,6 +453,8 @@ class LiveEngine:
                 self._last_bar_time = bar_time
                 self._predictive_cache = None  # Clear stale cache on new bar
                 self._radar_active = False     # V2.17: reset radar on new bar
+                # V5.0: Cancel stale pending orders on new bar
+                self._cancel_stale_limit_orders()
                 return True
 
             # Intra-bar monitoring (V2.14)
@@ -819,6 +853,8 @@ class LiveEngine:
             self._swing_extended = False
             self._last_trade_closed_bar_time = self._last_bar_time  # V3.7
             self._time_decay_squeezed = False  # V4.0: reset
+            self._tp_expansions = 0  # V5.0: reset
+            self._last_adx = 0.0
             return True
 
         result = self.executor.close_open_trade(reason)
@@ -826,6 +862,8 @@ class LiveEngine:
             self._swing_extended = False  # Reset for Elastic Cooldown
             self._last_trade_closed_bar_time = self._last_bar_time  # V3.7
             self._time_decay_squeezed = False  # V4.0: reset
+            self._tp_expansions = 0  # V5.0: reset
+            self._last_adx = 0.0
 
             # V4.0: Estimate PnL from last tick to update penalty box
             tick = mt5.symbol_info_tick(self.symbol)
@@ -985,9 +1023,38 @@ class LiveEngine:
         )
 
         acct = self.perception.get_account_info()
-        self._dispatch_action(
-            cache["action"], cache["regime"], pd.DataFrame(), acct["equity"],
-        )
+
+        # V5.0: Use Limit Order instead of Market Order when enabled
+        if LIMIT_ORDER_ENABLED and not self.risk.has_open_trade:
+            sym = self.perception.get_symbol_info()
+            limit_ticket = self.executor.place_limit_order(
+                direction=action_name,
+                limit_price=target,
+                regime=cache["regime"],
+                atr=atr,
+                point=sym["point"],
+                equity=acct["equity"],
+                tick_value=sym["trade_tick_value"],
+                tick_size=sym["trade_tick_size"],
+                volume_min=sym["volume_min"],
+                volume_max=sym["volume_max"],
+                volume_step=sym["volume_step"],
+            )
+            if limit_ticket is not None:
+                self._pending_limit_ticket = limit_ticket
+                self.log.info(
+                    "📌 LIMIT SPOOFER: %s_LIMIT placed at %.5f "
+                    "(ticket=%d, expires=%ds)",
+                    action_name,
+                    target,
+                    limit_ticket,
+                    LIMIT_ORDER_EXPIRY_SEC,
+                )
+        else:
+            self._dispatch_action(
+                cache["action"], cache["regime"], pd.DataFrame(), acct["equity"],
+            )
+
         self._predictive_cache = None
         self._radar_active = False  # V2.17: mission accomplished
         return True
@@ -1493,6 +1560,168 @@ class LiveEngine:
             return int(rates[0]["tick_volume"])
         return 0
 
+    # ── V5.0: Sub-Bar Scan (Async Tick-Level) ─────
+    def _subbar_scan(self) -> None:
+        """Lightweight sub-bar scan triggered every SUBBAR_TICK_INTERVAL ticks.
+
+        V5.0: Runs between bar closes at ~2.5 Hz max (rate-limited).
+        Checks:
+          1. Elastic TP expansion (ADX-driven)
+          2. Pending limit order fill detection
+        """
+        # 1. Elastic TP check (only when holding a position)
+        if self.risk.has_open_trade:
+            self._check_elastic_tp()
+
+        # 2. Sync pending limit order fills
+        if self._pending_limit_ticket is not None:
+            self._sync_limit_order_fill()
+
+    # ── V5.0: Dynamic Elastic TP ──────────────────
+    def _check_elastic_tp(self) -> None:
+        """Expand TP when ADX shows strengthening trend.
+
+        Condition: current_ADX > DYNAMIC_TP_ACTIVATION_ADX AND
+                   current_ADX > previous_ADX (rising trend strength)
+        Action: Push TP further by TP_EXPANSION_MULTIPLIER × ATR.
+        Cap: TP_MAX_EXPANSIONS per trade.
+        """
+        if not DYNAMIC_TP_ENABLED:
+            return
+        if not self.risk.has_open_trade:
+            self._tp_expansions = 0
+            self._last_adx = 0.0
+            return
+        if self._tp_expansions >= TP_MAX_EXPANSIONS:
+            return
+        if self._current_atr <= 0:
+            return
+
+        # Fetch current ADX from latest OHLCV
+        try:
+            ohlcv = self.perception.fetch_ohlcv()
+            if len(ohlcv) < 20:
+                return
+            features = self.perception.compute_features(ohlcv)
+            current_adx = float(features["adx"].iloc[-1])
+        except Exception:
+            return
+
+        if current_adx <= DYNAMIC_TP_ACTIVATION_ADX:
+            self._last_adx = current_adx
+            return
+
+        # ADX must be rising (strengthening trend)
+        if self._last_adx > 0 and current_adx <= self._last_adx:
+            self._last_adx = current_adx
+            return
+
+        trade = self.risk.open_trade
+        current_tp = float(trade.tp)
+        expansion = TP_EXPANSION_MULTIPLIER * self._current_atr
+
+        if trade.direction == "BUY":
+            new_tp = current_tp + expansion
+        else:
+            new_tp = current_tp - expansion
+
+        # Round to broker precision
+        sym_info = self.perception.get_symbol_info()
+        _point = sym_info["point"]
+        if _point > 0:
+            new_tp = round(new_tp / _point) * _point
+
+        if self.executor.modify_tp(new_tp):
+            self._tp_expansions += 1
+            self.log.info(
+                "🚀 ELASTIC TP EXPANSION #%d: Trade #%d TP %.5f → %.5f "
+                "(ADX=%.1f↑ > %.0f, +%.2f ATR)",
+                self._tp_expansions,
+                trade.ticket,
+                current_tp,
+                new_tp,
+                current_adx,
+                DYNAMIC_TP_ACTIVATION_ADX,
+                TP_EXPANSION_MULTIPLIER,
+            )
+
+        self._last_adx = current_adx
+
+    # ── V5.0: Pending Limit Order Sync ────────────
+    def _sync_limit_order_fill(self) -> None:
+        """Check if a pending limit order has been filled by the broker.
+
+        When the limit order fills, MT5 converts it into an open position.
+        We detect this and register the trade with RiskManager.
+        """
+        if self._pending_limit_ticket is None:
+            return
+
+        # Check if the order is still pending
+        orders = mt5.orders_get(symbol=self.symbol)
+        order_still_pending = False
+        if orders:
+            for order in orders:
+                if order.ticket == self._pending_limit_ticket:
+                    order_still_pending = True
+                    break
+
+        if order_still_pending:
+            return  # Still waiting for fill
+
+        # Order no longer pending — either filled or expired/cancelled
+        # Check if it became a position
+        positions = mt5.positions_get(symbol=self.symbol)
+        if positions:
+            for pos in positions:
+                if pos.magic == MAGIC_NUMBER and not self.risk.has_open_trade:
+                    # Found a MAGIC position without registration — limit order filled!
+                    from core.risk_manager import OpenTrade
+
+                    direction = "BUY" if pos.type == mt5.ORDER_TYPE_BUY else "SELL"
+                    regime = self._current_regime or Regime.HIGH_VOLATILITY
+                    trade = OpenTrade(
+                        ticket=pos.ticket,
+                        direction=direction,
+                        regime=regime,
+                        entry_price=pos.price_open,
+                        sl=pos.sl,
+                        tp=pos.tp,
+                        lot=pos.volume,
+                        open_bar=self._bar_count,
+                        open_time=datetime.utcnow(),
+                    )
+                    self.risk.register_open(trade)
+                    self.log.info(
+                        "📌 LIMIT ORDER FILLED: ticket=%d  %s %.2f @ %.5f "
+                        "(zero slippage entry)",
+                        pos.ticket,
+                        direction,
+                        pos.volume,
+                        pos.price_open,
+                    )
+                    self._pending_limit_ticket = None
+                    self._tp_expansions = 0  # V5.0: reset for new trade
+                    self._time_decay_squeezed = False
+                    return
+
+        # Order expired or was cancelled
+        self.log.info(
+            "❌ LIMIT ORDER EXPIRED/CANCELLED: ticket=%d",
+            self._pending_limit_ticket,
+        )
+        self._pending_limit_ticket = None
+
+    def _cancel_stale_limit_orders(self) -> None:
+        """Cancel any pending limit orders on new bar (V5.0 cleanup)."""
+        if self._pending_limit_ticket is not None:
+            cancelled = self.executor.cancel_pending_orders()
+            if cancelled > 0:
+                self.log.info(
+                    "🔄 NEW BAR: Cancelled %d stale limit order(s)", cancelled
+                )
+            self._pending_limit_ticket = None
+
     # ── Regime Shift  (SRS §4 — The Clean Slate + V3.5 Grace Period) ─
     def _handle_regime_shift(self, current_regime: Regime) -> None:
         """Force close all positions when regime changes.
@@ -1534,6 +1763,10 @@ class LiveEngine:
                 self._break_even_done = False
                 self._partial_close_done = False
                 self._swing_extended = False
+                # V5.0: Cancel pending limit orders + reset elastic TP
+                self._cancel_stale_limit_orders()
+                self._tp_expansions = 0
+                self._last_adx = 0.0
 
         self._prev_regime = current_regime
 
@@ -1687,6 +1920,9 @@ class LiveEngine:
 
         # V4.0: Reset squeeze flag for new trade
         self._time_decay_squeezed = False
+        # V5.0: Reset elastic TP state for new trade
+        self._tp_expansions = 0
+        self._last_adx = 0.0
 
     # ── Position Sync  (detect TP/SL hits by broker) ─
     def _sync_position_state(self) -> None:
@@ -1733,6 +1969,8 @@ class LiveEngine:
                 self._swing_extended = False
                 self._last_trade_closed_bar_time = self._last_bar_time  # V3.7
                 self._time_decay_squeezed = False  # V4.0: reset
+                self._tp_expansions = 0  # V5.0: reset
+                self._last_adx = 0.0
                 # V4.0: Penalty Box tracking for broker-closed trades
                 self._update_penalty_box(trade.direction, profit)
 
@@ -1772,6 +2010,9 @@ class LiveEngine:
         V3.0: Uses close_all_positions to handle primary + pyramid.
         """
         self.log.info("Shutting down...")
+
+        # V5.0: Cancel pending limit orders before shutdown
+        self._cancel_stale_limit_orders()
 
         if self.risk.has_open_trade or self._pyramid_ticket is not None:
             self.log.warning("Closing ALL positions before shutdown")

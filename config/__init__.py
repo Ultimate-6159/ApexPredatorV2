@@ -125,6 +125,16 @@ MAX_CONSECUTIVE_LOSSES_DIR: int = 2      # Consecutive same-direction losses bef
 PENALTY_BOX_MINUTES: int = 30           # Lockout duration for penalized direction
 TIME_DECAY_SL_BUMP_RATIO: float = 0.5   # Squeeze SL by this fraction of (entry - SL) distance
 
+# V5.0 — The Alpha HFT Paradigm
+LIMIT_ORDER_ENABLED: bool = True          # Use Limit Orders instead of Market for Phantom fires
+LIMIT_ORDER_EXPIRY_SEC: int = 300        # Limit order auto-cancel after this (M5 bar = 300s)
+SUBBAR_TICK_INTERVAL: int = 20           # Re-evaluate every N ticks within a bar
+SUBBAR_RATE_LIMIT_SEC: float = 0.4      # Min seconds between sub-bar scans (~2.5/sec)
+DYNAMIC_TP_ENABLED: bool = True          # Enable ADX-driven TP expansion
+DYNAMIC_TP_ACTIVATION_ADX: float = 35.0 # ADX must exceed this to expand TP
+TP_EXPANSION_MULTIPLIER: float = 0.5    # Expand TP by this × ATR per step
+TP_MAX_EXPANSIONS: int = 5              # Cap total expansions per trade
+
 # Inference Safety Guards
 OBS_CLIP_RANGE: float = 10.0             # Hard clip Z-Score features to ± this value
 CONFIDENCE_GATE_PCT: float = 65.0        # Force HOLD if AI confidence < this % (lowered for high-freq)
