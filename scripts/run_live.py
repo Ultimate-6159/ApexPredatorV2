@@ -86,6 +86,7 @@ from config import (
     PARTIAL_CLOSE_VOLUME_PCT,
     PENALTY_BOX_MINUTES,
     PHANTOM_SWEEP_ATR,
+    PREDICTIVE_CACHE_TTL_SEC,
     REGIME_SHIFT_GRACE_SEC,
     RISK_PER_TRADE_PCT,
     SUBBAR_RATE_LIMIT_SEC,
@@ -919,8 +920,13 @@ class LiveEngine:
           within MOMENTUM_WINDOW_SEC seconds → FIRE (prevents missing
           strong trends).
 
+        V5.3 — Cache Optimization:
+          - TTL extended to PREDICTIVE_CACHE_TTL_SEC (30 s) for M1/M5 coverage
+          - Phantom Sweep Limit Orders placed at sweep_peak (overshoot price)
+            instead of EMA target for maximum edge
+
         Guards:
-          - Cache expires after 10 s
+          - Cache expires after PREDICTIVE_CACHE_TTL_SEC
           - Cannot fire while a position is open
         """
         if self._predictive_cache is None:
@@ -942,10 +948,12 @@ class LiveEngine:
         now = time.time()
         time_elapsed = now - cache["timestamp"]
 
-        # Gate: cache freshness (expire after 10 s)
-        if time_elapsed > 10.0:
+        # Gate: cache freshness (V5.3: configurable TTL, default 30 s)
+        if time_elapsed > PREDICTIVE_CACHE_TTL_SEC:
             self.log.info(
-                "⏰ CACHE EXPIRED: %.1fs > 10s — discarding", time_elapsed,
+                "⏰ CACHE EXPIRED: %.1fs > %ds — discarding",
+                time_elapsed,
+                PREDICTIVE_CACHE_TTL_SEC,
             )
             self._predictive_cache = None
             return False
@@ -1050,12 +1058,21 @@ class LiveEngine:
 
         acct = self.perception.get_account_info()
 
-        # V5.0: Use Limit Order instead of Market Order when enabled
+        # V5.3: Use Limit Order at overshoot price (sweep_peak) for
+        # Phantom Sweep triggers; fall back to target for Momentum Bounce.
         if LIMIT_ORDER_ENABLED and not self.risk.has_open_trade:
             sym = self._cached_sym_info or self.perception.get_symbol_info()
+
+            # V5.3: Phantom Sweep → place limit at the deepest overshoot
+            # price (sweep_peak) for maximum edge; Momentum Bounce → target.
+            if trigger_name == "PHANTOM_SWEEP" and cache.get("sweep_peak") is not None:
+                limit_price = float(cache["sweep_peak"])
+            else:
+                limit_price = target
+
             limit_ticket = self.executor.place_limit_order(
                 direction=action_name,
-                limit_price=target,
+                limit_price=limit_price,
                 regime=cache["regime"],
                 atr=atr,
                 point=sym["point"],
@@ -1070,11 +1087,12 @@ class LiveEngine:
                 self._pending_limit_ticket = limit_ticket
                 self.log.info(
                     "📌 LIMIT SPOOFER: %s_LIMIT placed at %.5f "
-                    "(ticket=%d, expires=%ds)",
+                    "(ticket=%d, expires=%ds, trigger=%s)",
                     action_name,
-                    target,
+                    limit_price,
                     limit_ticket,
                     LIMIT_ORDER_EXPIRY_SEC,
+                    trigger_name,
                 )
         else:
             self._dispatch_action(
@@ -1089,20 +1107,20 @@ class LiveEngine:
     def _intra_bar_re_predict(self) -> bool:
         """Re-run AI prediction mid-candle after a cache expires.
 
-        V2.17 Infinite Radar: When a deferred signal's cache expires (>10 s),
-        fetch fresh OHLCV, re-detect regime, re-run inference, and create a
-        new Predictive Cache if the AI still signals BUY/SELL with ribbon
-        deferral.  The radar keeps spinning until the bar closes or the
-        signal fires.
+        V2.17 Infinite Radar: When a deferred signal's cache expires
+        (>PREDICTIVE_CACHE_TTL_SEC), fetch fresh OHLCV, re-detect regime,
+        re-run inference, and create a new Predictive Cache if the AI still
+        signals BUY/SELL with ribbon deferral.  The radar keeps spinning
+        until the bar closes or the signal fires.
 
-        Throttle: max 1 re-prediction per 10 s (natural cache cycle).
-        Only runs when flat (no open position).
+        Throttle: max 1 re-prediction per PREDICTIVE_CACHE_TTL_SEC (natural
+        cache cycle).  Only runs when flat (no open position).
         """
         if self.risk.has_open_trade:
             return False
 
         now = time.time()
-        if now - self._last_repredict_time < 10.0:
+        if now - self._last_repredict_time < PREDICTIVE_CACHE_TTL_SEC:
             return False
         self._last_repredict_time = now
 
