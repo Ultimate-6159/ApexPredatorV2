@@ -144,6 +144,10 @@ MAX_ALLOWED_SPREAD_POINTS: int = 300    # Block entry when spread > this (30 pip
 # V5.3 — The Cache Optimization
 PREDICTIVE_CACHE_TTL_SEC: int = 30       # Cache lifespan (covers M1/M5 candle swings)
 
+# V5.4 — The Omniscient Tick-Core Patch
+TICK_POLL_SEC: float = 0.1               # Always-on tick polling interval (100ms)
+EQUITY_JUMP_PCT: float = 0.5             # Force AI re-eval when equity jumps by this %
+
 # Inference Safety Guards
 OBS_CLIP_RANGE: float = 10.0             # Hard clip Z-Score features to ± this value
 CONFIDENCE_GATE_PCT: dict[Regime, float] = {   # V5.2: Regime-aware (2-action=55%, 3-action=65%)

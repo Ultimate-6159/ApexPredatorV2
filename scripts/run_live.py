@@ -30,6 +30,11 @@ V3.5 — The 5th Dimension Patch:
   16. Grace Period Shield — protect trades <180s from regime shift whiplash
   17. Volume-Kinetic Resonance — tick volume acceleration gate on Phantom Spoofer triggers
 
+V5.4 — The Omniscient Tick-Core Patch:
+  18. Event-Driven Sub-Bar Loop — always-on 100ms tick polling, no idle sleep
+  19. Real-Time State Sync — immediate limit fill + TP/SL detection with deal PnL
+  20. Equity Jump Trigger — balance/equity change detection forces AI re-evaluation
+
 Usage:
     python -m scripts.run_live [--timeframe M5] [--symbol XAUUSDm]
 """
@@ -69,6 +74,7 @@ from config import (
     ENABLE_BREAK_EVEN,
     ENABLE_PARTIAL_CLOSE,
     ENABLE_PYRAMIDING,
+    EQUITY_JUMP_PCT,
     LIMIT_ORDER_ENABLED,
     LIMIT_ORDER_EXPIRY_SEC,
     MAGIC_NUMBER,
@@ -92,6 +98,7 @@ from config import (
     SUBBAR_RATE_LIMIT_SEC,
     SUBBAR_TICK_INTERVAL,
     SYMBOL,
+    TICK_POLL_SEC,
     TIME_DECAY_SL_BUMP_RATIO,
     TIMEFRAME_NAME,
     TP_EXPANSION_MULTIPLIER,
@@ -370,6 +377,9 @@ class LiveEngine:
             acct["margin_free"],
         )
 
+        # V5.4: Initialize balance/equity cache for jump detection
+        self.risk.sync_balance_equity(acct["balance"], acct["equity"])
+
         # Enter main loop
         self.log.info(
             "Entering main loop (TF=%s, poll=%ds)",
@@ -404,16 +414,19 @@ class LiveEngine:
 
     # ── Bar Detection  (SRS §3) ───────────────
     def _wait_for_new_bar(self) -> bool:
-        """Block until a new bar closes. Returns False on unrecoverable error.
+        """Tick-driven event loop — polls every TICK_POLL_SEC (V5.4).
 
-        V2.15: Tick-level risk management (Break-Even / Trailing / Sync)
-               runs every 50 ms while a position is open or cache is active.
-               HFT Re-entry: if a position closes intra-bar, force an
-               immediate AI re-evaluation by returning True.
+        Returns True when AI re-evaluation is needed (new bar, intra-bar
+        close, or equity jump).  Returns False on unrecoverable error.
+
+        V5.4:  Omniscient Tick-Core — always-on 100ms polling replaces
+               the old 1s idle sleep.  Every tick cycle runs: position
+               sync, profit locking, trailing stop, time-decay, limit
+               order fill detection, and equity jump trigger.
 
         V5.0:  Sub-Bar Tick Counter — every SUBBAR_TICK_INTERVAL ticks,
-               run a lightweight sub-bar scan (Elastic TP + pending order
-               management) with rate limiting at SUBBAR_RATE_LIMIT_SEC.
+               run a lightweight sub-bar scan (Elastic TP) with rate
+               limiting at SUBBAR_RATE_LIMIT_SEC.
         """
         while True:
             if not self._check_connection():
@@ -440,11 +453,23 @@ class LiveEngine:
                         self._last_subbar_scan_time = now
                         self._subbar_scan()
 
+            # V5.4: Real-time limit order sync (every tick for <1s detection)
+            if self._pending_limit_ticket is not None:
+                self._sync_limit_order_fill()
+
             # HFT Re-entry: position just closed intra-bar → force AI now
             if was_open and not self.risk.has_open_trade:
+                # V5.4: Sync balance cache to prevent double-detection
+                _acct = mt5.account_info()
+                if _acct is not None:
+                    self.risk.sync_balance_equity(_acct.balance, _acct.equity)
                 self.log.info(
                     "⚡ INTRA-BAR CLOSE: Forcing AI re-evaluation!"
                 )
+                return True
+
+            # V5.4: Equity Jump Trigger (REQ-3)
+            if self._check_equity_jump():
                 return True
             # --------------------------------------------------
 
@@ -478,11 +503,8 @@ class LiveEngine:
             ):
                 self._intra_bar_re_predict()
 
-            # Dynamic polling: 50 ms HFT when active, 1 s when idle
-            if self._predictive_cache is not None or self.risk.has_open_trade:
-                time.sleep(0.05)
-            else:
-                time.sleep(1)
+            # V5.4: Always-on tick polling (omniscient mode — no idle sleep)
+            time.sleep(TICK_POLL_SEC)
 
     # ── Main Loop ─────────────────────────────
     def _main_loop(self) -> None:
@@ -1608,17 +1630,13 @@ class LiveEngine:
         """Lightweight sub-bar scan triggered every SUBBAR_TICK_INTERVAL ticks.
 
         V5.0: Runs between bar closes at ~2.5 Hz max (rate-limited).
+        V5.4: Limit order sync moved to main tick loop for <1s detection.
         Checks:
           1. Elastic TP expansion (ADX-driven)
-          2. Pending limit order fill detection
         """
         # 1. Elastic TP check (only when holding a position)
         if self.risk.has_open_trade:
             self._check_elastic_tp()
-
-        # 2. Sync pending limit order fills
-        if self._pending_limit_ticket is not None:
-            self._sync_limit_order_fill()
 
     # ── V5.0: Dynamic Elastic TP ──────────────────
     def _check_elastic_tp(self) -> None:
@@ -1729,7 +1747,7 @@ class LiveEngine:
                     )
                     self.risk.register_open(trade)
                     self.log.info(
-                        "📌 LIMIT ORDER FILLED: ticket=%d  %s %.2f @ %.5f "
+                        "⚡ LIMIT ORDER FILLED: Ticket #%d  %s %.2f @ %.5f "
                         "(zero slippage entry)",
                         pos.ticket,
                         direction,
@@ -1757,6 +1775,75 @@ class LiveEngine:
                     "🔄 NEW BAR: Cancelled %d stale limit order(s)", cancelled
                 )
             self._pending_limit_ticket = None
+
+    # ── V5.4: Equity Jump Trigger ─────────────────────
+    def _check_equity_jump(self) -> bool:
+        """V5.4: Detect balance/equity changes for immediate action (REQ-3).
+
+        Every tick cycle, compares current balance/equity against cached
+        values in RiskManager:
+          - Balance change → deal settled → log deal details (no silent profit)
+          - Equity jump > EQUITY_JUMP_PCT → force AI re-evaluation
+
+        Returns True if AI re-evaluation is needed.
+        """
+        acct = mt5.account_info()
+        if acct is None:
+            return False
+
+        trigger = False
+
+        # Balance change → deal was settled (REQ-3.2)
+        bal_changed, prev_bal = self.risk.detect_balance_change(acct.balance)
+        if bal_changed:
+            pnl = acct.balance - prev_bal
+            self.log.info(
+                "💰 BALANCE CHANGE: %.2f → %.2f (Δ%+.2f)",
+                prev_bal, acct.balance, pnl,
+            )
+            self._log_recent_deals()
+            trigger = True
+
+        # Equity jump → significant unrealized PnL move (REQ-3.3)
+        eq_jumped, change_pct, prev_equity = self.risk.detect_equity_jump(
+            acct.equity, EQUITY_JUMP_PCT,
+        )
+        if eq_jumped:
+            self.log.info(
+                "📊 EQUITY JUMP: %.2f → %.2f (%+.1f%%) "
+                "— forcing AI re-evaluation",
+                prev_equity, acct.equity, change_pct,
+            )
+            trigger = True
+
+        return trigger
+
+    def _log_recent_deals(self) -> None:
+        """V5.4: Log recent deal details for balance change traceability."""
+        try:
+            now = datetime.utcnow()
+            start = now - timedelta(seconds=30)
+            end = now + timedelta(minutes=1)
+            deals = mt5.history_deals_get(start, end)
+            if deals:
+                for deal in deals:
+                    if deal.entry == mt5.DEAL_ENTRY_OUT:
+                        total = deal.profit + deal.swap + deal.commission
+                        self.log.info(
+                            "  └─ Deal #%d | pos #%d | %s %.2f lots @ %.5f "
+                            "| profit=%.2f swap=%.2f comm=%.2f | total=%.2f",
+                            deal.ticket,
+                            deal.position_id,
+                            deal.symbol,
+                            deal.volume,
+                            deal.price,
+                            deal.profit,
+                            deal.swap,
+                            deal.commission,
+                            total,
+                        )
+        except Exception:
+            self.log.exception("Failed to query deal history")
 
     # ── Regime Shift  (SRS §4 — The Clean Slate + V3.5 Grace Period) ─
     def _handle_regime_shift(self, current_regime: Regime) -> None:
@@ -1996,9 +2083,9 @@ class LiveEngine:
                 profit = self._get_closed_trade_profit(trade.ticket, trade.open_time)
                 reason = "TP/SL_HIT" if profit != 0.0 else "BROKER_CLOSE"
                 self.log.info(
-                    "Trade #%d closed by broker (%s) [%s %s] — profit=%.2f",
-                    trade.ticket,
+                    "💰 POSITION CLOSED (%s): Ticket #%d [%s %s] — PnL=%.2f",
                     reason,
+                    trade.ticket,
                     trade.direction,
                     trade.regime.value,
                     profit,
@@ -2027,7 +2114,11 @@ class LiveEngine:
     def _get_closed_trade_profit(
         self, ticket: int, open_time: datetime
     ) -> float:
-        """Retrieve PnL for a position closed by the broker."""
+        """Retrieve PnL for a position closed by the broker.
+
+        V5.4: Logs full deal breakdown (profit + swap + commission) for
+        complete trade visibility — no silent profit.
+        """
         try:
             now = datetime.utcnow()
             start = open_time - timedelta(minutes=1)
@@ -2039,7 +2130,18 @@ class LiveEngine:
                         deal.position_id == ticket
                         and deal.entry == mt5.DEAL_ENTRY_OUT
                     ):
-                        return deal.profit + deal.swap + deal.commission
+                        total = deal.profit + deal.swap + deal.commission
+                        self.log.info(
+                            "  └─ Deal #%d @ %.5f | profit=%.2f "
+                            "swap=%.2f comm=%.2f | total=%.2f",
+                            deal.ticket,
+                            deal.price,
+                            deal.profit,
+                            deal.swap,
+                            deal.commission,
+                            total,
+                        )
+                        return total
         except Exception:
             self.log.exception("Failed to retrieve deal history for #%d", ticket)
         return 0.0

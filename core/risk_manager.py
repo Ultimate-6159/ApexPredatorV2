@@ -52,6 +52,10 @@ class RiskManager:
         self._open_trade: OpenTrade | None = None
         self._current_bar: int = 0
 
+        # V5.4 — Balance/Equity tracking for jump detection
+        self._last_known_balance: float | None = None
+        self._last_known_equity: float | None = None
+
     # ── Status ────────────────────────────────────
     @property
     def is_halted(self) -> bool:
@@ -323,3 +327,37 @@ class RiskManager:
 
     def update_bar(self, bar_index: int) -> None:
         self._current_bar = bar_index
+
+    # ── V5.4: Balance & Equity Jump Detection ────
+    def detect_balance_change(self, current_balance: float) -> tuple[bool, float]:
+        """Return (changed, previous_balance). Updates internal cache."""
+        if self._last_known_balance is None:
+            self._last_known_balance = current_balance
+            return False, current_balance
+
+        prev = self._last_known_balance
+        if abs(current_balance - prev) > 0.01:
+            self._last_known_balance = current_balance
+            return True, prev
+        return False, prev
+
+    def detect_equity_jump(
+        self, current_equity: float, threshold_pct: float,
+    ) -> tuple[bool, float, float]:
+        """Return (jumped, change_pct, previous_equity). Updates cache."""
+        if self._last_known_equity is None or self._last_known_equity <= 0:
+            self._last_known_equity = current_equity
+            return False, 0.0, current_equity
+
+        prev = self._last_known_equity
+        change_pct = (current_equity - prev) / prev * 100
+        self._last_known_equity = current_equity
+
+        if abs(change_pct) >= threshold_pct:
+            return True, change_pct, prev
+        return False, change_pct, prev
+
+    def sync_balance_equity(self, balance: float, equity: float) -> None:
+        """Update cached balance/equity (prevents double-detection after sync)."""
+        self._last_known_balance = balance
+        self._last_known_equity = equity
