@@ -105,9 +105,8 @@ PARTIAL_CLOSE_VOLUME_PCT: float = 0.5      # Fraction of lot to close (0.5 = 50%
 TRADE_LIFESPAN_NORMAL_SEC: int = 90      # TRENDING_UP / TRENDING_DOWN
 TRADE_LIFESPAN_VOLATILE_SEC: int = 300   # HIGH_VOLATILITY / MEAN_REVERTING
 
-# V3.0 — Risk-Free Pyramiding
-ENABLE_PYRAMIDING: bool = True           # Allow 2nd position when 1st is at break-even
-MAX_POSITIONS: int = 2                   # Maximum concurrent positions per symbol
+# V3.0 — Risk-Free Pyramiding (V5.1: unlimited positions when exposed risk = 0)
+ENABLE_PYRAMIDING: bool = True           # Allow pyramiding when all prior positions are at break-even
 
 # V3.0 — Phantom Spoofer Thresholds
 PHANTOM_SWEEP_ATR: float = 0.3          # Overshoot distance to detect SL sweep
@@ -127,13 +126,17 @@ TIME_DECAY_SL_BUMP_RATIO: float = 0.5   # Squeeze SL by this fraction of (entry 
 
 # V5.0 — The Alpha HFT Paradigm
 LIMIT_ORDER_ENABLED: bool = True          # Use Limit Orders instead of Market for Phantom fires
-LIMIT_ORDER_EXPIRY_SEC: int = 300        # Limit order auto-cancel after this (M5 bar = 300s)
+LIMIT_ORDER_EXPIRY_SEC: int = 5          # Limit order auto-cancel after this (micro-second ghost)
 SUBBAR_TICK_INTERVAL: int = 20           # Re-evaluate every N ticks within a bar
 SUBBAR_RATE_LIMIT_SEC: float = 0.4      # Min seconds between sub-bar scans (~2.5/sec)
 DYNAMIC_TP_ENABLED: bool = True          # Enable ADX-driven TP expansion
 DYNAMIC_TP_ACTIVATION_ADX: float = 35.0 # ADX must exceed this to expand TP
 TP_EXPANSION_MULTIPLIER: float = 0.5    # Expand TP by this × ATR per step
 TP_MAX_EXPANSIONS: int = 5              # Cap total expansions per trade
+
+# V5.1 — The HFT Optimization Patch
+MODIFY_THRESHOLD_POINTS: int = 15       # Skip SL/TP modify if delta < this × point (1.5 pips)
+MAX_ALLOWED_SPREAD_POINTS: int = 300    # Block entry when spread > this (30 pips for gold)
 
 # Inference Safety Guards
 OBS_CLIP_RANGE: float = 10.0             # Hard clip Z-Score features to ± this value

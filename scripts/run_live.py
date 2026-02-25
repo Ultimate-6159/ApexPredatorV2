@@ -71,8 +71,8 @@ from config import (
     LIMIT_ORDER_ENABLED,
     LIMIT_ORDER_EXPIRY_SEC,
     MAGIC_NUMBER,
+    MAX_ALLOWED_SPREAD_POINTS,
     MAX_CONSECUTIVE_LOSSES_DIR,
-    MAX_POSITIONS,
     MODEL_DIR,
     MOMENTUM_BOUNCE_ATR,
     MOMENTUM_WINDOW_SEC,
@@ -86,6 +86,7 @@ from config import (
     PENALTY_BOX_MINUTES,
     PHANTOM_SWEEP_ATR,
     REGIME_SHIFT_GRACE_SEC,
+    RISK_PER_TRADE_PCT,
     SUBBAR_RATE_LIMIT_SEC,
     SUBBAR_TICK_INTERVAL,
     SYMBOL,
@@ -1009,6 +1010,21 @@ class LiveEngine:
                 )
                 return False
 
+        # ── V5.1: Real Liquidity Gate (Spread Filter) ──
+        sym_info_vkr = self.perception.get_symbol_info()
+        _point_vkr = sym_info_vkr["point"]
+        if _point_vkr > 0:
+            current_spread = (tick.ask - tick.bid) / _point_vkr
+            if current_spread > MAX_ALLOWED_SPREAD_POINTS:
+                self.log.info(
+                    "⚠️ SPREAD FILTER: %s blocked — spread=%.0f pts > %d pts "
+                    "(low real liquidity)",
+                    trigger_name,
+                    current_spread,
+                    MAX_ALLOWED_SPREAD_POINTS,
+                )
+                return False
+
         # ── FIRE ──
         action_name = "BUY" if is_buy else "SELL"
         self.log.info(
@@ -1808,26 +1824,29 @@ class LiveEngine:
 
         if has_trade:
             if trade.direction == direction:
-                # V3.0 Risk-Free Pyramiding: allow 2nd position when
-                # primary is at break-even (zero additional risk)
+                # V5.1 Dynamic Risk-Based Pyramiding: allow unlimited
+                # positions as long as total exposed risk is near zero
+                # (all prior positions at break-even).
                 if (
                     ENABLE_PYRAMIDING
                     and self._break_even_done
-                    and self._pyramid_ticket is None
                 ):
-                    positions = mt5.positions_get(symbol=self.symbol)
-                    our_count = sum(
-                        1 for p in (positions or []) if p.magic == MAGIC_NUMBER
+                    sym = self.perception.get_symbol_info()
+                    exposed = self.risk.get_total_exposed_risk(
+                        symbol=self.symbol,
+                        magic=MAGIC_NUMBER,
+                        point=sym["point"],
                     )
-                    if our_count < MAX_POSITIONS:
+                    if exposed < RISK_PER_TRADE_PCT:
                         self.log.info(
-                            "🔥 RISK-FREE PYRAMIDING: Wood #1 (#%d) is safe, "
-                            "firing Wood #2!",
-                            trade.ticket,
+                            "🔥 RISK-FREE PYRAMIDING: Exposed risk=%.1f%% < %.0f%% "
+                            "— stacking new %s!",
+                            exposed,
+                            RISK_PER_TRADE_PCT,
+                            direction,
                         )
                         tick = mt5.symbol_info_tick(self.symbol)
                         if tick is not None:
-                            sym = self.perception.get_symbol_info()
                             ticket = self.executor.open_pyramid_position(
                                 direction=direction,
                                 regime=regime,

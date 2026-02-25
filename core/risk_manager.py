@@ -226,5 +226,53 @@ class RiskManager:
             return True
         return False
 
+    # ── V5.1: Dynamic Risk-Based Pyramiding ─────
+    @staticmethod
+    def get_total_exposed_risk(
+        symbol: str,
+        magic: int,
+        point: float,
+    ) -> float:
+        """Return the total exposed risk (% equity) of positions NOT at break-even.
+
+        A position is considered "at break-even" when its SL is at or beyond
+        its entry price (BUY: SL >= entry, SELL: SL <= entry).
+        Positions at break-even contribute 0 risk.
+        """
+        import MetaTrader5 as _mt5
+
+        positions = _mt5.positions_get(symbol=symbol)
+        if not positions:
+            return 0.0
+
+        acct = _mt5.account_info()
+        if acct is None or acct.equity <= 0:
+            return 0.0
+
+        total_risk = 0.0
+        for pos in positions:
+            if pos.magic != magic:
+                continue
+
+            direction = "BUY" if pos.type == _mt5.ORDER_TYPE_BUY else "SELL"
+            entry = pos.price_open
+            sl = pos.sl
+
+            # Check if at break-even (SL protects entry)
+            if direction == "BUY" and sl >= entry:
+                continue  # risk-free
+            if direction == "SELL" and sl <= entry:
+                continue  # risk-free
+
+            # Exposed risk = SL distance × volume × contract_size
+            sl_dist_pts = abs(entry - sl) / point if point > 0 else 0.0
+            sym_info = _mt5.symbol_info(symbol)
+            if sym_info is not None and sym_info.trade_tick_value > 0:
+                value_per_pt = sym_info.trade_tick_value * point / sym_info.trade_tick_size
+                risk_money = sl_dist_pts * value_per_pt * pos.volume
+                total_risk += (risk_money / acct.equity) * 100.0
+
+        return total_risk
+
     def update_bar(self, bar_index: int) -> None:
         self._current_bar = bar_index

@@ -17,6 +17,7 @@ from config import (
     AGENT_ACTION_MAP,
     LIMIT_ORDER_EXPIRY_SEC,
     MAGIC_NUMBER,
+    MODIFY_THRESHOLD_POINTS,
     ORDER_COMMENT,
     SLIPPAGE_POINTS,
     SYMBOL,
@@ -231,6 +232,13 @@ class ExecutionEngine:
         if trade is None:
             return False
 
+        # V5.1: Throttle — skip if price delta is negligible
+        info = mt5.symbol_info(self.symbol)
+        if info is not None:
+            _pt = info.point
+            if _pt > 0 and abs(trade.sl - new_sl) < MODIFY_THRESHOLD_POINTS * _pt:
+                return False
+
         # Sync position ticket from broker (may differ after partial close)
         actual_ticket = trade.ticket
         positions = mt5.positions_get(symbol=self.symbol)
@@ -266,6 +274,13 @@ class ExecutionEngine:
         trade = self.risk.open_trade
         if trade is None:
             return False
+
+        # V5.1: Throttle — skip if price delta is negligible
+        info = mt5.symbol_info(self.symbol)
+        if info is not None:
+            _pt = info.point
+            if _pt > 0 and abs(trade.tp - new_tp) < MODIFY_THRESHOLD_POINTS * _pt:
+                return False
 
         # Sync position ticket from broker
         actual_ticket = trade.ticket

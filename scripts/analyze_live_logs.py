@@ -106,6 +106,10 @@ _LIMIT_ORDER_EXPIRED_RE = re.compile(r"LIMIT ORDER EXPIRED/CANCELLED: ticket=(\d
 _ELASTIC_TP_RE = re.compile(r"ELASTIC TP EXPANSION #(\d+)")
 _SUBBAR_SCAN_RE = re.compile(r"NEW BAR: Cancelled (\d+) stale limit")
 
+# V5.1 HFT optimization patterns
+_SPREAD_FILTER_RE = re.compile(r"SPREAD FILTER: (\w+) blocked")
+_MODIFY_THROTTLE_RE = re.compile(r"MODIFY THROTTLE")
+
 
 # ══════════════════════════════════════════════
 # Data Structures
@@ -164,6 +168,8 @@ class DashboardData:
     limit_order_expired_count: int = 0
     elastic_tp_count: int = 0
     stale_limit_cancelled_count: int = 0
+    # V5.1 HFT optimization
+    spread_filter_count: int = 0
 
 
 # ══
@@ -440,6 +446,11 @@ def parse_logs(log_files: Sequence[Path]) -> DashboardData:
                     continue
                 if _SUBBAR_SCAN_RE.search(msg):
                     data.stale_limit_cancelled_count += 1
+                    continue
+
+                # ── V5.1 HFT optimization ──
+                if _SPREAD_FILTER_RE.search(msg):
+                    data.spread_filter_count += 1
                     continue
 
     return data
@@ -795,6 +806,7 @@ def display_dashboard(data: DashboardData) -> None:
         + data.volume_gate_count
         + data.limit_order_placed_count + data.limit_order_filled_count
         + data.limit_order_expired_count + data.elastic_tp_count
+        + data.spread_filter_count
     )
     if v3_total > 0:
         _section("V3.x / V4.0 / V5.0 DEFENSE & HFT SYSTEMS")
@@ -816,6 +828,7 @@ def display_dashboard(data: DashboardData) -> None:
         _kv("  └─ Expired/Cancelled", f"{data.limit_order_expired_count}")
         _kv("Elastic TP Expansions", f"{data.elastic_tp_count}")
         _kv("Stale Limits Cancelled", f"{data.stale_limit_cancelled_count}")
+        _kv("Spread Filter Blocks", f"{data.spread_filter_count}")
 
     # ── Recent Trades (last 10) ──
     if trades:
