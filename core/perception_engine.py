@@ -93,6 +93,9 @@ class StreamingIndicators:
         # Volume rolling window
         self._vol_buf: deque[float] = deque(maxlen=50)
 
+        # V11.0: Previous closes for multi-bar momentum
+        self._prev_closes: deque[float] = deque(maxlen=10)
+
     # ── Smart Dispatch ────────────────────────
     def compute(self, df: pd.DataFrame) -> pd.DataFrame:
         """Full numpy or incremental update based on state."""
@@ -285,6 +288,30 @@ class StreamingIndicators:
             candle_range > 0, np.abs(closes - opens) / candle_range, 0.0
         )
 
+        # 12. V11.0: Multi-bar momentum (beat market makers with trend persistence)
+        momentum_3bar = np.zeros(n)
+        momentum_3bar[3:] = (closes[3:] / closes[:-3] - 1.0) * 100
+
+        momentum_5bar = np.zeros(n)
+        momentum_5bar[5:] = (closes[5:] / closes[:-5] - 1.0) * 100
+
+        # 13. V11.0: Bar position — where price closed in the range (0=low, 1=high)
+        bar_position = np.where(
+            candle_range > 0, (closes - lows) / candle_range, 0.5
+        )
+
+        # 14. V11.0: Wick ratios — detect market maker rejection signatures
+        upper_wick_ratio = np.where(
+            candle_range > 0,
+            (highs - np.maximum(opens, closes)) / candle_range,
+            0.0,
+        )
+        lower_wick_ratio = np.where(
+            candle_range > 0,
+            (np.minimum(opens, closes) - lows) / candle_range,
+            0.0,
+        )
+
         # Build DataFrame
         feat = pd.DataFrame(
             {
@@ -304,6 +331,11 @@ class StreamingIndicators:
                 "hour_sin": hour_sin,
                 "hour_cos": hour_cos,
                 "body_ratio": body_ratio,
+                "momentum_3bar": momentum_3bar,
+                "momentum_5bar": momentum_5bar,
+                "bar_position": bar_position,
+                "upper_wick_ratio": upper_wick_ratio,
+                "lower_wick_ratio": lower_wick_ratio,
             },
             index=df.index,
         )
@@ -343,6 +375,10 @@ class StreamingIndicators:
 
         vol_start = max(0, n - 50)
         self._vol_buf = deque(volumes[vol_start:].tolist(), maxlen=50)
+
+        # V11.0: Save recent closes for incremental momentum
+        close_start = max(0, n - 10)
+        self._prev_closes = deque(closes[close_start:].tolist(), maxlen=10)
 
         self._initialized = True
         self._n_bars = n
@@ -462,10 +498,31 @@ class StreamingIndicators:
         candle_range = h - l
         body_ratio = abs(c - o) / candle_range if candle_range > 0 else 0.0
 
+        # V11.0: Multi-bar momentum from previous closes deque
+        closes_list = list(self._prev_closes)
+        momentum_3bar = 0.0
+        if len(closes_list) >= 3 and closes_list[-3] > 0:
+            momentum_3bar = (c / closes_list[-3] - 1.0) * 100
+        momentum_5bar = 0.0
+        if len(closes_list) >= 5 and closes_list[-5] > 0:
+            momentum_5bar = (c / closes_list[-5] - 1.0) * 100
+
+        # V11.0: Bar position (0=low, 1=high)
+        bar_position = (c - l) / candle_range if candle_range > 0 else 0.5
+
+        # V11.0: Wick ratios (market maker rejection detection)
+        upper_wick_ratio = (
+            (h - max(o, c)) / candle_range if candle_range > 0 else 0.0
+        )
+        lower_wick_ratio = (
+            (min(o, c) - l) / candle_range if candle_range > 0 else 0.0
+        )
+
         # Update previous bar
         self._prev_close = c
         self._prev_high = h
         self._prev_low = l
+        self._prev_closes.append(c)
         self._n_bars += 1
 
         feat = {
@@ -485,6 +542,11 @@ class StreamingIndicators:
             "hour_sin": hour_sin,
             "hour_cos": hour_cos,
             "body_ratio": body_ratio,
+            "momentum_3bar": momentum_3bar,
+            "momentum_5bar": momentum_5bar,
+            "bar_position": bar_position,
+            "upper_wick_ratio": upper_wick_ratio,
+            "lower_wick_ratio": lower_wick_ratio,
         }
         # Sanitize
         for k, val in feat.items():
@@ -582,7 +644,7 @@ class PerceptionEngine:
 
     # ── Feature Engineering (V6.0: streaming) ─────────
     def compute_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Compute 16 normalised, noise-free features.
+        """Compute 21 normalised, noise-free features.
 
         V6.0: Delegates to StreamingIndicators for zero-latency
         numpy-based computation with incremental updates.

@@ -32,46 +32,49 @@ from config import (
 logger = logging.getLogger(__name__)
 
 # ── Reward constants ─────────────────────────────
-_TP_REWARD: float = 1.0
+_TP_REWARD: float = 1.5                        # V11.0: 1.0→1.5 (stronger positive signal for winning)
 _SL_PENALTY: float = -1.0
-_TIMESTOP_PENALTY: float = -0.5
+_TIMESTOP_PENALTY: float = -0.3                # V11.0: -0.5→-0.3 (less harsh time penalty)
 _ATR_PERIOD: int = 14
 
 # Exit-strategy rewards (v2)
-_TRAILING_PENALTY: float = -2.0            # Penalise letting profit evaporate
-_TRAILING_DD_THRESHOLD: float = 0.3        # Trigger when 30 % of peak profit lost
-_PEAK_BONUS: float = 0.1                   # Small bonus each time profit makes new high
+_TRAILING_PENALTY: float = -1.5                # V11.0: -2.0→-1.5 (less harsh trailing penalty)
+_TRAILING_DD_THRESHOLD: float = 0.3            # Trigger when 30 % of peak profit lost
+_PEAK_BONUS: float = 0.15                      # V11.0: 0.1→0.15 (stronger trend-riding incentive)
 _CLOSE_PROFIT_BONUS: dict[Regime, float] = {
-    Regime.TRENDING_UP:     2.0,            # Bull Rider: 2× for profitable close
-    Regime.TRENDING_DOWN:   2.5,            # Bear Hunter: 2.5× (shorts must exit faster)
-    Regime.MEAN_REVERTING:  3.0,            # Range Sniper: 3× (scalp → take profit ASAP)
-    Regime.HIGH_VOLATILITY: 2.0,            # Vol Assassin: 2×
+    Regime.TRENDING_UP:     3.0,               # V11.0: 2.0→3.0 (reward profitable exits)
+    Regime.TRENDING_DOWN:   3.5,               # V11.0: 2.5→3.5 (reward profitable exits)
+    Regime.MEAN_REVERTING:  4.0,               # V11.0: 3.0→4.0 (big reward for scalp wins)
+    Regime.HIGH_VOLATILITY: 3.0,               # V11.0: 2.0→3.0 (reward capturing volatility)
 }
 
-# Entry cost — simulates spread/commission, discourages overtrading
+# Entry cost — simulates spread/commission
+# V11.0: DRAMATICALLY REDUCED — old costs made AI prefer HOLD over trading
 _ENTRY_COST: dict[Regime, float] = {
-    Regime.TRENDING_UP:     -0.02,          # Low — trends reward holding
-    Regime.TRENDING_DOWN:   -0.02,          # Low — trends reward holding
-    Regime.MEAN_REVERTING:  -0.15,          # High — sniper must be selective
-    Regime.HIGH_VOLATILITY: -0.20,          # High — spreads widen in volatile markets
+    Regime.TRENDING_UP:     -0.01,             # V11.0: -0.02→-0.01 (minimal friction)
+    Regime.TRENDING_DOWN:   -0.01,             # V11.0: -0.02→-0.01 (minimal friction)
+    Regime.MEAN_REVERTING:  -0.03,             # V11.0: -0.15→-0.03 (was 5× too high!)
+    Regime.HIGH_VOLATILITY: -0.05,             # V11.0: -0.20→-0.05 (was 4× too high!)
 }
 
-# Hold-while-flat reward per regime (replaces global _HOLD_FLAT_PENALTY)
+# Hold-while-flat reward per regime
+# V11.0: ALL regimes penalise inaction — AI must trade to survive
 _HOLD_FLAT_REWARD: dict[Regime, float] = {
-    Regime.TRENDING_UP:     -0.005,         # V8.0: 5× stronger — trends punish inaction
-    Regime.TRENDING_DOWN:   -0.005,         # V8.0: 5× stronger — trends punish inaction
-    Regime.MEAN_REVERTING:   0.01,          # Patience reward — wait for edge
-    Regime.HIGH_VOLATILITY:  0.005,         # Small patience reward — wait for clean setup
+    Regime.TRENDING_UP:     -0.008,            # V11.0: -0.005→-0.008 (stronger push to enter)
+    Regime.TRENDING_DOWN:   -0.008,            # V11.0: -0.005→-0.008 (stronger push to enter)
+    Regime.MEAN_REVERTING:  -0.003,            # V11.0: +0.01→-0.003 (was REWARDING inaction!)
+    Regime.HIGH_VOLATILITY: -0.003,            # V11.0: +0.005→-0.003 (was REWARDING inaction!)
 }
 
 # Cooldown: min bars between closing and re-opening
+# V11.0: Reduced cooldowns for rapid-fire trading
 _COOLDOWN_BARS: dict[Regime, int] = {
-    Regime.TRENDING_UP:     0,              # No cooldown for trends
-    Regime.TRENDING_DOWN:   0,              # No cooldown for trends
-    Regime.MEAN_REVERTING:  3,              # Must wait 3 bars after closing
-    Regime.HIGH_VOLATILITY: 2,              # Must wait 2 bars — let vol settle
+    Regime.TRENDING_UP:     0,                 # No cooldown for trends
+    Regime.TRENDING_DOWN:   0,                 # No cooldown for trends
+    Regime.MEAN_REVERTING:  1,                 # V11.0: 3→1 (rapid re-entry for scalps)
+    Regime.HIGH_VOLATILITY: 1,                 # V11.0: 2→1 (rapid re-entry in volatility)
 }
-_COOLDOWN_PENALTY: float = -0.3             # Extra cost for re-entering during cooldown
+_COOLDOWN_PENALTY: float = -0.1                # V11.0: -0.3→-0.1 (less punitive)
 
 
 class TradingEnv(gym.Env):

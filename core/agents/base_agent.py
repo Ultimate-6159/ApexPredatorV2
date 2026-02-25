@@ -14,7 +14,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.callbacks import CallbackList
 
-from config import MODEL_DIR, TRAINING_TIMESTEPS, Regime
+from config import MODEL_DIR, PPO_GAMMA, TRAINING_TIMESTEPS, Regime
 
 if TYPE_CHECKING:
     from training.training_logger import TrainingLogger
@@ -74,13 +74,23 @@ class BaseAgent:
         """
         logger.info("Training %s for %d timesteps …", self.regime.value, timesteps)
 
-        # V8.0: Tuned defaults for financial RL (overridable via algo_kwargs)
+        # V11.0: "The Apex Mind" — deeper network + per-regime tuning
         default_kwargs: dict[str, Any] = {
-            "learning_rate": 1e-4,      # Slower learning — prevents overshooting
-            "n_steps": 512,             # Shorter rollouts — faster regime adaptation
-            "batch_size": 128,          # Larger batches — smoother gradients
-            "ent_coef": 0.01,           # Exploration bonus — avoids action collapse
-            "gamma": 0.95,              # Shorter discount — matches 5–20 bar trades
+            "learning_rate": 3e-4,      # V11.0: 1e-4→3e-4 (faster convergence with deeper net)
+            "n_steps": 1024,            # V11.0: 512→1024 (longer rollouts for trend learning)
+            "batch_size": 256,          # V11.0: 128→256 (smoother gradients with deeper net)
+            "ent_coef": 0.02,           # V11.0: 0.01→0.02 (stronger exploration — breaks action collapse)
+            "gamma": PPO_GAMMA.get(self.regime, 0.95),  # V11.0: per-regime discount horizon
+            "clip_range": 0.15,         # V11.0: tighter PPO clip (financial stability)
+            "max_grad_norm": 0.5,       # V11.0: explicit gradient clipping
+            "n_epochs": 15,             # V11.0: more gradient steps per batch
+            "gae_lambda": 0.92,         # V11.0: slightly lower — faster credit assignment
+            "policy_kwargs": dict(
+                net_arch=dict(
+                    pi=[256, 256],      # V11.0: 4× larger actor (64→256 per layer)
+                    vf=[256, 256],      # V11.0: 4× larger critic
+                ),
+            ),
         }
         default_kwargs.update(self.algo_kwargs)
 

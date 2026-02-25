@@ -15,7 +15,7 @@ load_dotenv()
 # ──────────────────────────────────────────────
 SYMBOL: str = os.getenv("MT5_SYMBOL", "XAUUSD")
 TIMEFRAME_NAME: str = "M5"       # Primary timeframe label
-LOOKBACK_BARS: int = 500         # Bars to fetch for feature calculation (V5.2: EMA200 warm-up)
+LOOKBACK_BARS: int = 1000        # V11.0: 500→1000 — more warm-up for momentum features
 
 # ──────────────────────────────────────────────
 # Regime Detection Thresholds  (Meta-Router)
@@ -160,11 +160,11 @@ SPREAD_ATR_FRACTION: float = 0.10         # Training spread simulation: 10% of A
 
 # Inference Safety Guards
 OBS_CLIP_RANGE: float = 10.0             # Hard clip Z-Score features to ± this value
-CONFIDENCE_GATE_PCT: dict[Regime, float] = {   # V10.0: Lowered for rapid-fire trading
-    Regime.TRENDING_UP:     45.0,               # V10.0: 60→45 (let more signals through)
-    Regime.TRENDING_DOWN:   45.0,               # V10.0: 60→45 (let more signals through)
-    Regime.MEAN_REVERTING:  45.0,               # V10.0: 65→45 (was blocking 60% of MR signals)
-    Regime.HIGH_VOLATILITY: 45.0,               # V10.0: 65→45 (was blocking most HV signals)
+CONFIDENCE_GATE_PCT: dict[Regime, float] = {   # V11.0: Per-action-count aware
+    Regime.TRENDING_UP:     30.0,               # V11.0: 45→30 (2-action: random=50%, gate must be low)
+    Regime.TRENDING_DOWN:   30.0,               # V11.0: 45→30 (2-action: random=50%, gate must be low)
+    Regime.MEAN_REVERTING:  40.0,               # V11.0: 45→40 (3-action: random=33%, still selective)
+    Regime.HIGH_VOLATILITY: 40.0,               # V11.0: 45→40 (3-action: random=33%, still selective)
 }
 
 # News Filter (Forex Factory calendar — forces HIGH_VOLATILITY before red news)
@@ -176,8 +176,17 @@ NEWS_CACHE_HOURS: int = 4                # Re-fetch calendar interval
 # ──────────────────────────────────────────────
 # Training
 # ──────────────────────────────────────────────
-TRAINING_TIMESTEPS: int = 500_000    # V8.0: 2.5× more steps for 16-feature space
+TRAINING_TIMESTEPS: int = 1_000_000  # V11.0: 500K→1M — deeper network needs more training
+TRAINING_BARS: int = 50_000          # V11.0: Training data — 6 months of M5 bars
 MODEL_DIR: str = "models"
+
+# V11.0 — Per-Regime Agent Tuning (The Apex Mind)
+PPO_GAMMA: dict[Regime, float] = {
+    Regime.TRENDING_UP:     0.99,   # Long horizon — value distant TP reward
+    Regime.TRENDING_DOWN:   0.99,   # Long horizon — value distant TP reward
+    Regime.MEAN_REVERTING:  0.95,   # Short horizon — scalp rewards matter now
+    Regime.HIGH_VOLATILITY: 0.95,   # Short horizon — quick capture
+}
 
 # ──────────────────────────────────────────────
 # Training Logging

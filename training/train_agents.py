@@ -9,7 +9,7 @@ import sys
 
 import pandas as pd
 
-from config import LOOKBACK_BARS, TRAINING_TIMESTEPS, Regime
+from config import LOOKBACK_BARS, TRAINING_BARS, TRAINING_TIMESTEPS, Regime
 from core.agents.bear_hunter import BearHunter
 from core.agents.bull_rider import BullRider
 from core.agents.range_sniper import RangeSniper
@@ -47,7 +47,7 @@ def _filter_regime_data(
 
 def train_all(
     timeframe: str = "M5",
-    bars: int = 5000,
+    bars: int = TRAINING_BARS,
     timesteps: int = TRAINING_TIMESTEPS,
 ) -> None:
     """Connect to MT5, pull data, filter per regime, train each agent."""
