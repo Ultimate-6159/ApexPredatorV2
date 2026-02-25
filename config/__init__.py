@@ -117,11 +117,11 @@ MOMENTUM_WINDOW_SEC: float = 3.0        # Time window for velocity measurement
 
 # V3.5 — The 5th Dimension Patch
 REGIME_SHIFT_GRACE_SEC: int = 180        # Shield fresh trades from regime shift (3 minutes)
-VOLUME_ACCEL_MULTIPLIER: float = 1.5    # Tick volume must be > multiplier × avg to confirm trigger
+VOLUME_ACCEL_MULTIPLIER: float = 1.0    # V9.0: Lowered (1.5→1.0) — sweep confirmed by price, not volume
 
 # V4.0 — Volume-Kinetic Sizing & Filters
 VOLUME_SMA_PERIOD: int = 10              # Bars for rolling volume average
-VOLUME_SPIKE_MULTIPLIER: float = 1.2    # Entry gate: tick_vol must be > avg × this
+VOLUME_SPIKE_MULTIPLIER: float = 0.8    # V9.0: Lowered (1.2→0.8) — Asian session has 40-60% less vol
 MAX_CONSECUTIVE_LOSSES_DIR: int = 2      # Consecutive same-direction losses before penalty
 PENALTY_BOX_MINUTES: int = 30           # Lockout duration for penalized direction
 TIME_DECAY_SL_BUMP_RATIO: float = 0.5   # Squeeze SL by this fraction of (entry - SL) distance

@@ -1129,18 +1129,29 @@ class LiveEngine:
         # ── V3.5: Volume-Kinetic Resonance Gate ──
         # Don't fire unless tick volume confirms real money flow.
         # Fake sweeps/bounces have price movement but no volume.
+        # V9.0: 5s cooldown + auto-cancel after 3 consecutive blocks
+        if cache.get("vkr_cooldown_until", 0.0) > now:
+            return False
         if self._avg_tick_volume > 0:
             current_tick_vol = self._get_current_tick_volume()
             if current_tick_vol < self._avg_tick_volume * VOLUME_ACCEL_MULTIPLIER:
+                cache["vkr_cooldown_until"] = now + 5.0
+                cache["vkr_block_count"] = cache.get("vkr_block_count", 0) + 1
                 self.log.info(
                     "📊 VKR GATE: %s blocked — tick_vol=%d < %.0f "
-                    "(avg=%.0f × %.1f) — fake bounce",
+                    "(avg=%.0f × %.1f) — attempt %d/3",
                     trigger_name,
                     current_tick_vol,
                     self._avg_tick_volume * VOLUME_ACCEL_MULTIPLIER,
                     self._avg_tick_volume,
                     VOLUME_ACCEL_MULTIPLIER,
+                    cache["vkr_block_count"],
                 )
+                if cache["vkr_block_count"] >= 3:
+                    self.log.info(
+                        "📊 VKR GATE: 3 blocks — cancelling cache"
+                    )
+                    self._predictive_cache = None
                 return False
 
         # ── V5.1: Real Liquidity Gate (Spread Filter) ──
@@ -1727,13 +1738,14 @@ class LiveEngine:
         return self._tick_history[-1][1] - best_tick[1]
 
     def _get_current_tick_volume(self) -> int:
-        """Return the current (forming) bar's tick_volume from MT5.
+        """Return the previous COMPLETED bar's tick_volume from MT5.
 
-        Used by V3.5 Volume-Kinetic Resonance to confirm real money
-        flow behind price movement before firing a cached trigger.
+        V9.0: Changed from forming bar (idx=0) to previous bar (idx=1).
+        Forming bar starts at tick_vol=1 which always fails volume gates.
+        Previous bar has full 5-min of ticks → fair comparison with avg.
         """
         rates = mt5.copy_rates_from_pos(
-            self.symbol, self.perception.timeframe, 0, 1
+            self.symbol, self.perception.timeframe, 1, 1
         )
         if rates is not None and len(rates) > 0:
             return int(rates[0]["tick_volume"])
