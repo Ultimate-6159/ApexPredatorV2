@@ -260,15 +260,9 @@ class TradingEnv(gym.Env):
                 progress = (self._hold_counter - half) / max(half, 1)
                 time_penalty = -0.05 * (1.0 + progress)  # -0.05 → -0.10
 
-            # ── 6. Voluntary close: HOLD while in position = exit ──
-            if action == ACTION_HOLD:
-                pnl_norm = self._normalised_pnl(price)
-                if pnl_norm > 0:
-                    reward = pnl_norm * self.close_bonus
-                else:
-                    reward = pnl_norm
-                self._reset_position()
-                return reward
+            # ── 6. V5.2: HOLD while in position = maintain (aligned with live) ──
+            # HOLD no longer exits — it falls through to section 8 (unrealised PnL).
+            # Exit is handled by TP/SL, opposite signal (§7), time stop, or trailing.
 
             # ── 7. Agent closes via opposite signal ──
             if (action == ACTION_BUY and self._position == -1) or (

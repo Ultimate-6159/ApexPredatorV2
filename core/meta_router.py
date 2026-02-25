@@ -11,7 +11,8 @@ import logging
 import pandas as pd
 
 from config import (
-    ADX_TREND_THRESHOLD,
+    ADX_TREND_ENTER,
+    ADX_TREND_EXIT,
     VOLATILITY_RATIO_THRESHOLD,
     Regime,
 )
@@ -20,17 +21,23 @@ logger = logging.getLogger("apex_live")
 
 
 class MetaRouter:
-    """Classifies market regime from the latest feature row."""
+    """Classifies market regime from the latest feature row.
 
-    @staticmethod
-    def detect_regime(features: pd.Series) -> Regime:
+    V5.2: Stateful with ADX hysteresis to prevent regime flapping.
+    """
+
+    def __init__(self) -> None:
+        self._prev_regime: Regime = Regime.MEAN_REVERTING
+
+    def detect_regime(self, features: pd.Series) -> Regime:
         """Determine regime from a single feature row.
 
         Priority order (first match wins):
         1. HIGH_VOLATILITY  — Volatility Ratio > threshold
-        2. TRENDING_UP      — ADX > threshold *and* +DI > -DI
-        3. TRENDING_DOWN    — ADX > threshold *and* -DI > +DI
-        4. MEAN_REVERTING   — fallback (ADX < threshold)
+        2. TRENDING_UP/DOWN — ADX hysteresis (enter > 25, exit < 20) + DI
+        3. MEAN_REVERTING   — fallback
+
+        V5.2: ADX hysteresis prevents regime flapping at boundary.
         """
         adx: float = float(features.get("adx", 0))
         plus_di: float = float(features.get("plus_di", 0))
@@ -41,16 +48,23 @@ class MetaRouter:
         if vol_ratio > VOLATILITY_RATIO_THRESHOLD:
             regime = Regime.HIGH_VOLATILITY
 
-        # 2-3. Trending (ADX strong enough)
-        elif adx > ADX_TREND_THRESHOLD:
-            if plus_di > minus_di:
-                regime = Regime.TRENDING_UP
+        # 2-3. Trending with hysteresis (V5.2)
+        elif self._prev_regime in (Regime.TRENDING_UP, Regime.TRENDING_DOWN):
+            # Already trending — stay until ADX drops below exit threshold
+            if adx > ADX_TREND_EXIT:
+                regime = Regime.TRENDING_UP if plus_di > minus_di else Regime.TRENDING_DOWN
             else:
-                regime = Regime.TRENDING_DOWN
+                regime = Regime.MEAN_REVERTING
+
+        elif adx > ADX_TREND_ENTER:
+            # Not trending — need stronger signal to enter
+            regime = Regime.TRENDING_UP if plus_di > minus_di else Regime.TRENDING_DOWN
 
         # 4. Fallback — mean-reverting / range
         else:
             regime = Regime.MEAN_REVERTING
+
+        self._prev_regime = regime
 
         logger.info(
             "Regime=%s  (ADX=%.1f, +DI=%.1f, -DI=%.1f, VolRatio=%.2f)",

@@ -274,5 +274,52 @@ class RiskManager:
 
         return total_risk
 
+    # ── V5.2: Simplified Exposed Risk (% of balance) ─────
+    @staticmethod
+    def get_total_exposed_risk_pct(
+        symbol: str,
+        current_balance: float,
+    ) -> float:
+        """Return % risk of positions NOT at break-even (relative to balance).
+
+        A position at break-even (BUY: SL >= entry, SELL: SL <= entry)
+        contributes 0 risk.  Only counts MAGIC_NUMBER positions.
+        """
+        import MetaTrader5 as _mt5
+        from config import MAGIC_NUMBER as _magic
+
+        positions = _mt5.positions_get(symbol=symbol)
+        if not positions or current_balance <= 0:
+            return 0.0
+
+        sym_info = _mt5.symbol_info(symbol)
+        if sym_info is None:
+            return 0.0
+
+        total_risk_money = 0.0
+        for pos in positions:
+            if pos.magic != _magic:
+                continue
+
+            direction = "BUY" if pos.type == _mt5.ORDER_TYPE_BUY else "SELL"
+            entry = pos.price_open
+            sl = pos.sl
+
+            # Break-even → risk-free
+            if direction == "BUY" and sl >= entry:
+                continue
+            if direction == "SELL" and sl <= entry:
+                continue
+
+            # Risk = SL distance × volume × value_per_point
+            dist_pts = abs(entry - sl) / sym_info.point if sym_info.point > 0 else 0.0
+            if sym_info.trade_tick_value > 0 and sym_info.trade_tick_size > 0:
+                value_per_pt = (
+                    sym_info.trade_tick_value * sym_info.point / sym_info.trade_tick_size
+                )
+                total_risk_money += dist_pts * pos.volume * value_per_pt
+
+        return (total_risk_money / current_balance) * 100.0
+
     def update_bar(self, bar_index: int) -> None:
         self._current_bar = bar_index

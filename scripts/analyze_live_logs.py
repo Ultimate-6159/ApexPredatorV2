@@ -622,7 +622,7 @@ def display_dashboard(data: DashboardData) -> None:
     exp = _expectancy(trades)
 
     # ── Header ──
-    _header("APEX PREDATOR V5.0 — LIVE PERFORMANCE DASHBOARD")
+    _header("APEX PREDATOR V5.2 — LIVE PERFORMANCE DASHBOARD")
 
     if data.balance_series:
         first_ts = data.balance_series[0][0].strftime("%Y-%m-%d %H:%M")
@@ -809,7 +809,7 @@ def display_dashboard(data: DashboardData) -> None:
         + data.spread_filter_count
     )
     if v3_total > 0:
-        _section("V3.x / V4.0 / V5.0 DEFENSE & HFT SYSTEMS")
+        _section("V3.x / V4.0 / V5.0-V5.2 DEFENSE & HFT SYSTEMS")
         _kv("Break-Even Activations", f"{data.break_even_count}")
         _kv("Partial Closes (50%)", f"{data.partial_close_count}")
         _kv("Phantom Spoofer Fires", f"{data.phantom_fire_count}")

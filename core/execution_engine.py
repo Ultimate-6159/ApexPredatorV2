@@ -641,3 +641,71 @@ class ExecutionEngine:
                     "Failed to cancel pending #%d: %s", order.ticket, result
                 )
         return cancelled
+
+    # ── V5.2: Simplified Limit Order (pre-calculated SL/TP) ─────
+    def open_limit_order(
+        self,
+        direction: str,
+        lot: float,
+        limit_price: float,
+        sl: float,
+        tp: float,
+    ) -> int | None:
+        """Place a Limit Order with pre-calculated SL/TP (Zero Slippage).
+
+        Unlike place_limit_order(), the caller supplies lot/sl/tp directly.
+        Returns the pending order ticket on success, or None on failure.
+        """
+        order_type = (
+            mt5.ORDER_TYPE_BUY_LIMIT
+            if direction == "BUY"
+            else mt5.ORDER_TYPE_SELL_LIMIT
+        )
+
+        expiry_time = datetime.utcnow() + timedelta(seconds=LIMIT_ORDER_EXPIRY_SEC)
+
+        request = {
+            "action": mt5.TRADE_ACTION_PENDING,
+            "symbol": self.symbol,
+            "volume": float(lot),
+            "type": order_type,
+            "price": float(limit_price),
+            "sl": float(sl),
+            "tp": float(tp),
+            "magic": MAGIC_NUMBER,
+            "comment": ORDER_COMMENT,
+            "type_time": mt5.ORDER_TIME_SPECIFIED,
+            "expiration": int(expiry_time.timestamp()),
+            "type_filling": self._get_filling_type(),
+        }
+
+        result = mt5.order_send(request)
+
+        # Fallback: if ORDER_TIME_SPECIFIED not supported, use GTC
+        if result is not None and result.retcode in (10013, 10030):
+            logger.warning(
+                "Limit order TIME_SPECIFIED rejected (retcode=%d) — "
+                "falling back to GTC",
+                result.retcode,
+            )
+            request["type_time"] = mt5.ORDER_TIME_GTC
+            request.pop("expiration", None)
+            result = mt5.order_send(request)
+
+        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            logger.error("Limit order FAILED: %s", result)
+            return None
+
+        logger.info(
+            "📌 LIMIT ORDER PLACED: %s_LIMIT %.2f @ %.3f "
+            "(Expires %ds)",
+            direction,
+            lot,
+            limit_price,
+            LIMIT_ORDER_EXPIRY_SEC,
+        )
+        return result.order
+
+    def cancel_stale_limit_orders(self) -> int:
+        """Cancel stale Limit Orders that haven't been filled (V5.2 alias)."""
+        return self.cancel_pending_orders()

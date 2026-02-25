@@ -43,6 +43,7 @@ import math
 import os
 import sys
 import time
+from collections import deque
 from datetime import datetime, timedelta
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
@@ -287,11 +288,11 @@ class LiveEngine:
         self._swing_extended: bool = True  # True at startup to allow first trade
         self._last_ema7: float = 0.0
 
-        # V3.0 — Pyramid state
-        self._pyramid_ticket: int | None = None
+        # V3.0 — Pyramid state (V5.2: multi-ticket list)
+        self._pyramid_tickets: list[int] = []
 
-        # V3.0 — Tick history for velocity measurement
-        self._tick_history: list[tuple[float, float]] = []  # [(timestamp, price), ...]
+        # V3.0 — Tick history for velocity measurement (V5.2: deque for O(1) prune)
+        self._tick_history: deque[tuple[float, float]] = deque(maxlen=500)
 
         # V3.5 — Average tick volume (rolling 50-bar baseline for VKR gate)
         self._avg_tick_volume: float = 0.0
@@ -319,6 +320,10 @@ class LiveEngine:
         # V5.0 — Dynamic Elastic TP state
         self._tp_expansions: int = 0
         self._last_adx: float = 0.0
+
+        # V5.2 — Cached data for performance
+        self._cached_sym_info: dict[str, Any] | None = None
+        self._cached_adx: float = 0.0
 
         # News filter
         self.news_filter: NewsFilter | None = None
@@ -515,6 +520,9 @@ class LiveEngine:
             features = self.perception.compute_features(ohlcv)
             latest_row = features.iloc[-1]
 
+            # V5.2: Cache ADX for sub-bar elastic TP
+            self._cached_adx = float(latest_row.get("adx", 0.0))
+
             # 3. Compute & store ATR (used by trailing stop + dispatch)
             hl_range = (ohlcv["High"] - ohlcv["Low"]).rolling(ATR_PERIOD).mean()
             self._current_atr = float(hl_range.iloc[-1]) if not hl_range.empty else 0.0
@@ -534,7 +542,8 @@ class LiveEngine:
                 )
 
             # 3a. Spread/ATR Normalization Gate — skip bar if ATR too small vs spread
-            sym_info = self.perception.get_symbol_info()
+            self._cached_sym_info = self.perception.get_symbol_info()
+            sym_info = self._cached_sym_info
             _point = sym_info["point"]
             if _point > 0 and self._current_atr > 0:
                 current_atr_points = self._current_atr / _point
@@ -644,12 +653,13 @@ class LiveEngine:
             # 12c. Confidence gate — force HOLD if AI is uncertain
             if actual_action != ACTION_HOLD and probs is not None:
                 action_conf = float(probs[raw_action]) * 100
-                if action_conf < CONFIDENCE_GATE_PCT:
+                gate = CONFIDENCE_GATE_PCT.get(regime, 65.0) if isinstance(CONFIDENCE_GATE_PCT, dict) else CONFIDENCE_GATE_PCT
+                if action_conf < gate:
                     self.log.warning(
                         "🛡️ CONFIDENCE GATE: %.1f%% < %.0f%% threshold "
                         "— forcing HOLD",
                         action_conf,
-                        CONFIDENCE_GATE_PCT,
+                        gate,
                     )
                     actual_action = ACTION_HOLD
 
@@ -843,14 +853,14 @@ class LiveEngine:
         direction = trade.direction
 
         # V3.0: If primary is closing, also close pyramid
-        if self._pyramid_ticket is not None:
+        if self._pyramid_tickets:
             self.log.info(
-                "Closing pyramid #%d along with primary (%s)",
-                self._pyramid_ticket, reason,
+                "Closing %d pyramid position(s) along with primary (%s)",
+                len(self._pyramid_tickets), reason,
             )
             self.executor.close_all_positions(reason)
             self.risk.register_close(0.0)
-            self._pyramid_ticket = None
+            self._pyramid_tickets.clear()
             self._swing_extended = False
             self._last_trade_closed_bar_time = self._last_bar_time  # V3.7
             self._time_decay_squeezed = False  # V4.0: reset
@@ -1011,7 +1021,7 @@ class LiveEngine:
                 return False
 
         # ── V5.1: Real Liquidity Gate (Spread Filter) ──
-        sym_info_vkr = self.perception.get_symbol_info()
+        sym_info_vkr = self._cached_sym_info or self.perception.get_symbol_info()
         _point_vkr = sym_info_vkr["point"]
         if _point_vkr > 0:
             current_spread = (tick.ask - tick.bid) / _point_vkr
@@ -1042,7 +1052,7 @@ class LiveEngine:
 
         # V5.0: Use Limit Order instead of Market Order when enabled
         if LIMIT_ORDER_ENABLED and not self.risk.has_open_trade:
-            sym = self.perception.get_symbol_info()
+            sym = self._cached_sym_info or self.perception.get_symbol_info()
             limit_ticket = self.executor.place_limit_order(
                 direction=action_name,
                 limit_price=target,
@@ -1170,10 +1180,11 @@ class LiveEngine:
             # Confidence gate
             if actual_action != ACTION_HOLD and probs is not None:
                 action_conf = float(probs[raw_action]) * 100
-                if action_conf < CONFIDENCE_GATE_PCT:
+                gate = CONFIDENCE_GATE_PCT.get(regime, 65.0) if isinstance(CONFIDENCE_GATE_PCT, dict) else CONFIDENCE_GATE_PCT
+                if action_conf < gate:
                     self.log.info(
                         "🔄 RADAR: Confidence %.1f%% < %.0f%% — no cache",
-                        action_conf, CONFIDENCE_GATE_PCT,
+                        action_conf, gate,
                     )
                     return False
 
@@ -1319,7 +1330,7 @@ class LiveEngine:
             return
 
         trade = self.risk.open_trade
-        sym = self.perception.get_symbol_info()
+        sym = self._cached_sym_info or self.perception.get_symbol_info()
         point = sym["point"]
 
         tick = mt5.symbol_info_tick(self.symbol)
@@ -1417,7 +1428,7 @@ class LiveEngine:
         if tick is None:
             return
 
-        sym = self.perception.get_symbol_info()
+        sym = self._cached_sym_info or self.perception.get_symbol_info()
         point = sym["point"]
 
         # Dynamic thresholds: ATR multiplier → points
@@ -1511,7 +1522,7 @@ class LiveEngine:
                 )
 
             # Round to broker precision
-            sym_info = self.perception.get_symbol_info()
+            sym_info = self._cached_sym_info or self.perception.get_symbol_info()
             _point = sym_info["point"]
             if _point > 0:
                 new_sl = round(new_sl / _point) * _point
@@ -1532,14 +1543,12 @@ class LiveEngine:
 
     # ── V3.0: Tick Recording & Velocity ───────────
     def _record_tick(self, price: float) -> None:
-        """Append current tick to history and prune stale entries (>10 s)."""
+        """Append current tick to history (V5.2: deque auto-prunes via maxlen)."""
         now = time.time()
         self._tick_history.append((now, price))
-        # Keep only the last 10 seconds of ticks
-        cutoff = now - 10.0
-        self._tick_history = [
-            (t, p) for t, p in self._tick_history if t >= cutoff
-        ]
+        # Deque maxlen handles size; prune stale entries > 10s for velocity calc
+        while self._tick_history and (now - self._tick_history[0][0]) > 10.0:
+            self._tick_history.popleft()
 
     def _compute_tick_velocity(self, window_sec: float) -> float:
         """Compute signed price movement over the last *window_sec* seconds.
@@ -1613,15 +1622,8 @@ class LiveEngine:
         if self._current_atr <= 0:
             return
 
-        # Fetch current ADX from latest OHLCV
-        try:
-            ohlcv = self.perception.fetch_ohlcv()
-            if len(ohlcv) < 20:
-                return
-            features = self.perception.compute_features(ohlcv)
-            current_adx = float(features["adx"].iloc[-1])
-        except Exception:
-            return
+        # V5.2: Use cached ADX from last bar close (avoids 300-bar fetch at 2.5 Hz)
+        current_adx = self._cached_adx
 
         if current_adx <= DYNAMIC_TP_ACTIVATION_ADX:
             self._last_adx = current_adx
@@ -1642,7 +1644,7 @@ class LiveEngine:
             new_tp = current_tp - expansion
 
         # Round to broker precision
-        sym_info = self.perception.get_symbol_info()
+        sym_info = self._cached_sym_info or self.perception.get_symbol_info()
         _point = sym_info["point"]
         if _point > 0:
             new_tp = round(new_tp / _point) * _point
@@ -1752,7 +1754,7 @@ class LiveEngine:
                 self._prev_regime.value,
                 current_regime.value,
             )
-            if self.risk.has_open_trade or self._pyramid_ticket is not None:
+            if self.risk.has_open_trade or self._pyramid_tickets:
                 # V3.5 Grace Period: shield fresh trades from regime shift
                 if self.risk.has_open_trade:
                     trade = self.risk.open_trade
@@ -1775,7 +1777,7 @@ class LiveEngine:
                 # Sync internal state
                 if self.risk.has_open_trade:
                     self.risk.register_close(0.0)
-                self._pyramid_ticket = None
+                self._pyramid_tickets.clear()
                 self._break_even_done = False
                 self._partial_close_done = False
                 self._swing_extended = False
@@ -1831,7 +1833,7 @@ class LiveEngine:
                     ENABLE_PYRAMIDING
                     and self._break_even_done
                 ):
-                    sym = self.perception.get_symbol_info()
+                    sym = self._cached_sym_info or self.perception.get_symbol_info()
                     exposed = self.risk.get_total_exposed_risk(
                         symbol=self.symbol,
                         magic=MAGIC_NUMBER,
@@ -1862,7 +1864,7 @@ class LiveEngine:
                                 volume_step=sym["volume_step"],
                             )
                             if ticket is not None:
-                                self._pyramid_ticket = ticket
+                                self._pyramid_tickets.append(ticket)
                         return
                 # Anti-Martingale: same direction + no pyramid conditions → PASS
                 return
@@ -1916,7 +1918,7 @@ class LiveEngine:
             self.log.error("Cannot get tick — skipping trade")
             return
 
-        sym = self.perception.get_symbol_info()
+        sym = self._cached_sym_info or self.perception.get_symbol_info()
 
         # Find the raw_action index for ExecutionEngine
         raw_action_idx = AGENT_ACTION_MAP[regime].index(action)
@@ -1950,7 +1952,7 @@ class LiveEngine:
         V3.0: Also monitors the pyramid ticket — if it disappears from
         the broker, reset _pyramid_ticket (TP/SL hit on Wood #2).
         """
-        if not self.risk.has_open_trade and self._pyramid_ticket is None:
+        if not self.risk.has_open_trade and not self._pyramid_tickets:
             return
 
         positions = mt5.positions_get(symbol=self.symbol)
@@ -1993,14 +1995,16 @@ class LiveEngine:
                 # V4.0: Penalty Box tracking for broker-closed trades
                 self._update_penalty_box(trade.direction, profit)
 
-        # --- V3.0: Pyramid ticket sync ---
-        if self._pyramid_ticket is not None:
-            if self._pyramid_ticket not in magic_tickets:
+        # --- V3.0: Pyramid ticket sync (V5.2: multi-ticket) ---
+        if self._pyramid_tickets:
+            closed_pyramids = [
+                t for t in self._pyramid_tickets if t not in magic_tickets
+            ]
+            for t in closed_pyramids:
                 self.log.info(
-                    "🔥 Pyramid #%d closed by broker (TP/SL hit)",
-                    self._pyramid_ticket,
+                    "🔥 Pyramid #%d closed by broker (TP/SL hit)", t
                 )
-                self._pyramid_ticket = None
+                self._pyramid_tickets.remove(t)
 
     def _get_closed_trade_profit(
         self, ticket: int, open_time: datetime
@@ -2033,13 +2037,13 @@ class LiveEngine:
         # V5.0: Cancel pending limit orders before shutdown
         self._cancel_stale_limit_orders()
 
-        if self.risk.has_open_trade or self._pyramid_ticket is not None:
+        if self.risk.has_open_trade or self._pyramid_tickets:
             self.log.warning("Closing ALL positions before shutdown")
             closed = self.executor.close_all_positions("SHUTDOWN")
             self.log.info("Shutdown closed %d position(s)", closed)
             if self.risk.has_open_trade:
                 self.risk.register_close(0.0)
-            self._pyramid_ticket = None
+            self._pyramid_tickets.clear()
 
         self.perception.disconnect()
         self.log.info("═══ Apex Predator V2 — Live Engine Stopped ═══")

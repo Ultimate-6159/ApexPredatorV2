@@ -15,12 +15,14 @@ load_dotenv()
 # ──────────────────────────────────────────────
 SYMBOL: str = os.getenv("MT5_SYMBOL", "XAUUSD")
 TIMEFRAME_NAME: str = "M5"       # Primary timeframe label
-LOOKBACK_BARS: int = 300         # Bars to fetch for feature calculation
+LOOKBACK_BARS: int = 500         # Bars to fetch for feature calculation (V5.2: EMA200 warm-up)
 
 # ──────────────────────────────────────────────
 # Regime Detection Thresholds  (Meta-Router)
 # ──────────────────────────────────────────────
 ADX_TREND_THRESHOLD: float = 23.0
+ADX_TREND_ENTER: float = 25.0           # V5.2: Hysteresis — ADX must exceed this to enter trending
+ADX_TREND_EXIT: float = 20.0            # V5.2: Hysteresis — ADX must drop below this to exit trending
 VOLATILITY_RATIO_THRESHOLD: float = 1.5
 ADX_PERIOD: int = 10
 ATR_PERIOD: int = 14
@@ -57,7 +59,7 @@ AGENT_ACTION_MAP: dict[Regime, list[int]] = {
 # ──────────────────────────────────────────────
 # Risk Management
 # ──────────────────────────────────────────────
-RISK_PER_TRADE_PCT: float = 8.0   # 8 % of equity (reduced for high-frequency scalping)
+RISK_PER_TRADE_PCT: float = 3.0   # 3 % of equity (V5.2: balanced risk for sustainable growth)
 MAX_DRAWDOWN_PCT: float = 60.0    # 60 % hard stop (accommodates aggressive risk per trade)
 CONSECUTIVE_LOSS_LIMIT: int = 5
 HALT_MINUTES: int = 30            # Cool-off after consecutive losses
@@ -82,15 +84,15 @@ DEFAULT_SL_PIPS: float = 30.0
 DEFAULT_TP_PIPS: float = 60.0
 ATR_SL_MULTIPLIER: float = 1.5
 ATR_TP_MULTIPLIER: dict[Regime, float] = {
-    Regime.TRENDING_UP:     1.20,   # Hit & Run — fast TP for high-frequency re-entry
-    Regime.TRENDING_DOWN:   1.20,
-    Regime.MEAN_REVERTING:  0.80,   # Tight scalp in ranging markets
-    Regime.HIGH_VOLATILITY: 1.50,
+    Regime.TRENDING_UP:     2.50,   # Trend-riding R:R = 1.67:1 (Elastic TP expands further)
+    Regime.TRENDING_DOWN:   2.50,   # Trend-riding R:R = 1.67:1
+    Regime.MEAN_REVERTING:  1.80,   # Balanced scalp R:R = 1.20:1
+    Regime.HIGH_VOLATILITY: 2.50,   # Capture volatility R:R = 1.67:1
 }
 
 # Trailing Stop (ATR-based — adapts to volatility)
-TRAILING_ACTIVATION_ATR: float = 0.8    # Activate after 0.8 × ATR profit
-TRAILING_DRAWDOWN_ATR: float = 0.4      # Force close if retraces 0.4 × ATR from peak
+TRAILING_ACTIVATION_ATR: float = 1.5    # Activate after 1.5 × ATR profit (V5.2: let trend run)
+TRAILING_DRAWDOWN_ATR: float = 0.8      # Force close if retraces 0.8 × ATR from peak
 
 # Profit Locking Strategy (Break-Even + Partial Close)
 ENABLE_BREAK_EVEN: bool = True
@@ -102,8 +104,8 @@ PARTIAL_CLOSE_ACTIVATION_ATR: float = 1.0  # Close 50% when profit >= 1.0 × ATR
 PARTIAL_CLOSE_VOLUME_PCT: float = 0.5      # Fraction of lot to close (0.5 = 50%)
 
 # V3.0 — Virtual Time-Decay Shield (V3.7: regime-aware)
-TRADE_LIFESPAN_NORMAL_SEC: int = 90      # TRENDING_UP / TRENDING_DOWN
-TRADE_LIFESPAN_VOLATILE_SEC: int = 300   # HIGH_VOLATILITY / MEAN_REVERTING
+TRADE_LIFESPAN_NORMAL_SEC: int = 600     # TRENDING_UP / TRENDING_DOWN (V5.2: 2× M5 bar)
+TRADE_LIFESPAN_VOLATILE_SEC: int = 900   # HIGH_VOLATILITY / MEAN_REVERTING (V5.2: 3× M5 bar)
 
 # V3.0 — Risk-Free Pyramiding (V5.1: unlimited positions when exposed risk = 0)
 ENABLE_PYRAMIDING: bool = True           # Allow pyramiding when all prior positions are at break-even
@@ -126,9 +128,10 @@ TIME_DECAY_SL_BUMP_RATIO: float = 0.5   # Squeeze SL by this fraction of (entry 
 
 # V5.0 — The Alpha HFT Paradigm
 LIMIT_ORDER_ENABLED: bool = True          # Use Limit Orders instead of Market for Phantom fires
-LIMIT_ORDER_EXPIRY_SEC: int = 5          # Limit order auto-cancel after this (micro-second ghost)
+LIMIT_ORDER_EXPIRY_SEC: int = 10         # V5.2: Limit order auto-cancel after 10s
 SUBBAR_TICK_INTERVAL: int = 20           # Re-evaluate every N ticks within a bar
-SUBBAR_RATE_LIMIT_SEC: float = 0.4      # Min seconds between sub-bar scans (~2.5/sec)
+SUBBAR_EVAL_TICKS: int = SUBBAR_TICK_INTERVAL  # V5.2: Alias for clarity
+SUBBAR_RATE_LIMIT_SEC: float = 0.5      # V5.2: Min seconds between sub-bar scans (~2/sec)
 DYNAMIC_TP_ENABLED: bool = True          # Enable ADX-driven TP expansion
 DYNAMIC_TP_ACTIVATION_ADX: float = 35.0 # ADX must exceed this to expand TP
 TP_EXPANSION_MULTIPLIER: float = 0.5    # Expand TP by this × ATR per step
@@ -140,7 +143,12 @@ MAX_ALLOWED_SPREAD_POINTS: int = 300    # Block entry when spread > this (30 pip
 
 # Inference Safety Guards
 OBS_CLIP_RANGE: float = 10.0             # Hard clip Z-Score features to ± this value
-CONFIDENCE_GATE_PCT: float = 65.0        # Force HOLD if AI confidence < this % (lowered for high-freq)
+CONFIDENCE_GATE_PCT: dict[Regime, float] = {   # V5.2: Regime-aware (2-action=55%, 3-action=65%)
+    Regime.TRENDING_UP:     55.0,               # 2-action agent: random baseline 50%
+    Regime.TRENDING_DOWN:   55.0,               # 2-action agent: random baseline 50%
+    Regime.MEAN_REVERTING:  65.0,               # 3-action agent: random baseline 33%
+    Regime.HIGH_VOLATILITY: 65.0,               # 3-action agent: random baseline 33%
+}
 
 # News Filter (Forex Factory calendar — forces HIGH_VOLATILITY before red news)
 NEWS_FILTER_ENABLED: bool = True
