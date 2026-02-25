@@ -38,17 +38,25 @@ class ExecutionEngine:
     ) -> None:
         self.risk = risk_manager
         self.symbol = symbol
+        self._cached_filling_mode: int | None = None  # V6.0: lazy-cached
 
-    # ── Filling Mode Detection ────────────────────
+    # ── Filling Mode Detection (V6.0: cached) ────────
     def _get_filling_type(self) -> int:
-        """Detect broker-supported order filling mode."""
+        """Return broker-supported filling mode (V6.0: single-shot cache)."""
+        if self._cached_filling_mode is not None:
+            return self._cached_filling_mode
         info = mt5.symbol_info(self.symbol)
         if info is not None:
             if info.filling_mode & 2:  # SYMBOL_FILLING_IOC
-                return mt5.ORDER_FILLING_IOC
-            if info.filling_mode & 1:  # SYMBOL_FILLING_FOK
-                return mt5.ORDER_FILLING_FOK
-        return mt5.ORDER_FILLING_RETURN
+                self._cached_filling_mode = mt5.ORDER_FILLING_IOC
+            elif info.filling_mode & 1:  # SYMBOL_FILLING_FOK
+                self._cached_filling_mode = mt5.ORDER_FILLING_FOK
+            else:
+                self._cached_filling_mode = mt5.ORDER_FILLING_RETURN
+        else:
+            self._cached_filling_mode = mt5.ORDER_FILLING_RETURN
+        logger.info("V6.0: Filling mode cached = %d", self._cached_filling_mode)
+        return self._cached_filling_mode
 
     # ── Public API ────────────────────────────────
     def execute_action(
@@ -104,17 +112,6 @@ class ExecutionEngine:
         }
 
         result = mt5.order_send(request)
-
-        # Retry with alternative filling modes on Invalid Request
-        if result is not None and result.retcode == 10013:
-            logger.warning("Open order retcode=10013 — trying alternative filling modes")
-            for alt in [mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_RETURN]:
-                if alt == request["type_filling"]:
-                    continue
-                request["type_filling"] = alt
-                result = mt5.order_send(request)
-                if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
-                    break
 
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
             logger.error("Order FAILED: %s", result)
@@ -195,17 +192,6 @@ class ExecutionEngine:
         }
 
         result = mt5.order_send(request)
-
-        # Retry with alternative filling modes on Invalid Request
-        if result is not None and result.retcode == 10013:
-            logger.warning("Close retcode=10013 — trying alternative filling modes")
-            for alt in [mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_RETURN]:
-                if alt == request["type_filling"]:
-                    continue
-                request["type_filling"] = alt
-                result = mt5.order_send(request)
-                if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
-                    break
 
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
             logger.error("Close FAILED (%s): %s", reason, result)
@@ -356,17 +342,6 @@ class ExecutionEngine:
 
         result = mt5.order_send(request)
 
-        # Retry with alternative filling modes on Invalid Request
-        if result is not None and result.retcode == 10013:
-            logger.warning("Partial close retcode=10013 — trying alternative filling modes")
-            for alt in [mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_RETURN]:
-                if alt == request["type_filling"]:
-                    continue
-                request["type_filling"] = alt
-                result = mt5.order_send(request)
-                if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
-                    break
-
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
             logger.error("Partial close FAILED: %s", result)
             return False
@@ -444,17 +419,6 @@ class ExecutionEngine:
 
         result = mt5.order_send(request)
 
-        # Retry with alternative filling modes on Invalid Request
-        if result is not None and result.retcode == 10013:
-            logger.warning("Pyramid open retcode=10013 — trying alternative filling modes")
-            for alt in [mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_RETURN]:
-                if alt == request["type_filling"]:
-                    continue
-                request["type_filling"] = alt
-                result = mt5.order_send(request)
-                if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
-                    break
-
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
             logger.error("Pyramid order FAILED: %s", result)
             return None
@@ -515,16 +479,6 @@ class ExecutionEngine:
             }
 
             result = mt5.order_send(request)
-
-            # Retry with alternative filling modes
-            if result is not None and result.retcode == 10013:
-                for alt in [mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_RETURN]:
-                    if alt == request["type_filling"]:
-                        continue
-                    request["type_filling"] = alt
-                    result = mt5.order_send(request)
-                    if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
-                        break
 
             if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
                 logger.info(

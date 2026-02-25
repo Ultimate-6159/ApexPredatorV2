@@ -148,6 +148,10 @@ PREDICTIVE_CACHE_TTL_SEC: int = 30       # Cache lifespan (covers M1/M5 candle s
 TICK_POLL_SEC: float = 0.1               # Always-on tick polling interval (100ms)
 EQUITY_JUMP_PCT: float = 0.5             # Force AI re-eval when equity jumps by this %
 
+# V6.0 — The Institutional HFT Patch
+DOM_IMBALANCE_THRESHOLD: float = 3.0     # Block entry when opposite DOM volume > this × our volume
+ADAPTIVE_NORM_ALPHA: float = 0.05        # EMA learning rate for adaptive observation normalization
+
 # Inference Safety Guards
 OBS_CLIP_RANGE: float = 10.0             # Hard clip Z-Score features to ± this value
 CONFIDENCE_GATE_PCT: dict[Regime, float] = {   # V5.2: Regime-aware (2-action=55%, 3-action=65%)

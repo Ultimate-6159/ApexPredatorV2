@@ -64,11 +64,13 @@ from config import (
     ACTION_BUY,
     ACTION_HOLD,
     ACTION_SELL,
+    ADAPTIVE_NORM_ALPHA,
     AGENT_ACTION_MAP,
     ATR_PERIOD,
     BREAK_EVEN_ACTIVATION_ATR,
     BREAK_EVEN_BUFFER_POINTS,
     CONFIDENCE_GATE_PCT,
+    DOM_IMBALANCE_THRESHOLD,
     DYNAMIC_TP_ACTIVATION_ADX,
     DYNAMIC_TP_ENABLED,
     ENABLE_BREAK_EVEN,
@@ -250,6 +252,54 @@ def _normalize_obs(
 
 
 # ══════════════════════════════════════════════
+# V6.0: Adaptive Normalization (Dynamic AI Tuning)
+# ══════════════════════════════════════════════
+class AdaptiveNormalizer:
+    """Online adaptive normalization using Exponential Moving Average.
+
+    Initialises from static ``obs_stats.json`` then drifts mean/std to
+    track the live market distribution.  This keeps the AI's "vision"
+    calibrated without retraining.
+    """
+
+    def __init__(
+        self,
+        alpha: float,
+        initial_stats: dict[str, list[float]] | None = None,
+    ) -> None:
+        self._alpha = alpha
+        if initial_stats is not None:
+            self._mean = np.array(initial_stats["mean"], dtype=np.float32)
+            self._std = np.array(initial_stats["std"], dtype=np.float32)
+            self._std = np.maximum(self._std, 0.01)
+            self._initialized = True
+        else:
+            self._mean: np.ndarray | None = None
+            self._std: np.ndarray | None = None
+            self._initialized = False
+
+    def update(self, raw_obs: np.ndarray) -> None:
+        """Update running mean/std with a new observation (EMA)."""
+        if not self._initialized:
+            self._mean = raw_obs.copy().astype(np.float32)
+            self._std = np.ones_like(raw_obs, dtype=np.float32)
+            self._initialized = True
+            return
+
+        a = self._alpha
+        self._mean = raw_obs * a + self._mean * (1 - a)
+        deviation = np.sqrt((raw_obs - self._mean) ** 2)
+        self._std = deviation * a + self._std * (1 - a)
+        self._std = np.maximum(self._std, 0.01)
+
+    def normalize(self, raw_obs: np.ndarray) -> np.ndarray:
+        """Normalize using adaptive stats."""
+        if not self._initialized:
+            return raw_obs
+        return (raw_obs - self._mean) / (self._std + 1e-8)
+
+
+# ══════════════════════════════════════════════
 # Live Engine
 # ══════════════════════════════════════════════
 class LiveEngine:
@@ -350,6 +400,14 @@ class LiveEngine:
         # §1  Load all 4 agents into RAM
         self.agents = _load_all_agents(self.log)
         self.log.info("All 4 agents loaded into RAM")
+
+        # V6.0: Initialize adaptive normalizers per regime
+        for regime, data in self.agents.items():
+            data["normalizer"] = AdaptiveNormalizer(
+                alpha=ADAPTIVE_NORM_ALPHA,
+                initial_stats=data["stats"],
+            )
+        self.log.info("V6.0: Adaptive normalizers initialised (alpha=%.3f)", ADAPTIVE_NORM_ALPHA)
 
         # Connect to MT5
         if not self._ensure_connection():
@@ -626,10 +684,15 @@ class LiveEngine:
             if self.risk.should_time_stop(self._bar_count):
                 self._close_and_track("TIME_STOP")
 
-            # 9. Normalize observation  (SRS §2)
+            # 9. Normalize observation  (SRS §2 + V6.0 Adaptive)
             raw_obs = latest_row.values.astype(np.float32)
             agent_data = self.agents[regime]
-            obs_normalized = _normalize_obs(raw_obs, agent_data["stats"])
+            normalizer = agent_data.get("normalizer")
+            if normalizer is not None:
+                normalizer.update(raw_obs)
+                obs_normalized = normalizer.normalize(raw_obs)
+            else:
+                obs_normalized = _normalize_obs(raw_obs, agent_data["stats"])
             obs_ready = obs_normalized.reshape(1, -1)
 
             # 9b. Sanitize NaN/Inf THEN hard clip (3-layer defense)
@@ -1065,6 +1128,26 @@ class LiveEngine:
                 )
                 return False
 
+        # ── V6.0: DOM Order Flow Shield ──
+        dom = self.perception.get_market_depth()
+        if dom is not None:
+            if is_buy:
+                our_vol = dom["bid_volume"]
+                wall_vol = dom["ask_volume"]
+            else:
+                our_vol = dom["ask_volume"]
+                wall_vol = dom["bid_volume"]
+            imbalance = wall_vol / our_vol if our_vol > 0 else float("inf")
+            if imbalance > DOM_IMBALANCE_THRESHOLD:
+                self.log.info(
+                    "🏛️ DOM GATE: %s blocked — imbalance=%.1f > %.1f "
+                    "(massive opposite wall)",
+                    trigger_name,
+                    imbalance,
+                    DOM_IMBALANCE_THRESHOLD,
+                )
+                return False
+
         # ── FIRE ──
         action_name = "BUY" if is_buy else "SELL"
         self.log.info(
@@ -1189,7 +1272,11 @@ class LiveEngine:
             # ── Normalize + sanitize ──
             raw_obs = latest_row.values.astype(np.float32)
             agent_data = self.agents[regime]
-            obs_normalized = _normalize_obs(raw_obs, agent_data["stats"])
+            normalizer = agent_data.get("normalizer")
+            if normalizer is not None:
+                obs_normalized = normalizer.normalize(raw_obs)
+            else:
+                obs_normalized = _normalize_obs(raw_obs, agent_data["stats"])
             obs_ready = obs_normalized.reshape(1, -1)
             obs_ready = np.nan_to_num(
                 obs_ready, nan=0.0,
