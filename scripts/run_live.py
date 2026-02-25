@@ -821,15 +821,11 @@ class LiveEngine:
                 tick_price = float(_tick.bid) if _tick is not None else float(close_series.iloc[-1])
 
                 if actual_action == ACTION_BUY and regime == Regime.TRENDING_UP:
-                    ribbon_ok = (
-                        current_ema7 > current_ema20
-                        and ribbon_gap >= 0.1 * self._current_atr
-                        and current_low <= current_ema7 + 0.2 * self._current_atr
-                        and tick_price > current_ema7
-                    )
-                    if rsi_fast_val >= 85.0:
+                    # V10.0: Simplified ribbon — trust AI, only check EMA direction
+                    ribbon_ok = current_ema7 > current_ema20
+                    if rsi_fast_val >= 92.0:  # V10.0: widened (85→92)
                         self.log.info(
-                            "🚨 RSI FILTER: BUY blocked (RSI=%.1f >= 85)",
+                            "🚨 RSI FILTER: BUY blocked (RSI=%.1f >= 92)",
                             rsi_fast_val,
                         )
                         actual_action = ACTION_HOLD
@@ -857,15 +853,11 @@ class LiveEngine:
                         actual_action = ACTION_HOLD
 
                 elif actual_action == ACTION_SELL and regime == Regime.TRENDING_DOWN:
-                    ribbon_ok = (
-                        current_ema7 < current_ema20
-                        and ribbon_gap >= 0.1 * self._current_atr
-                        and current_high >= current_ema7 - 0.2 * self._current_atr
-                        and tick_price < current_ema7
-                    )
-                    if rsi_fast_val <= 15.0:
+                    # V10.0: Simplified ribbon — trust AI, only check EMA direction
+                    ribbon_ok = current_ema7 < current_ema20
+                    if rsi_fast_val <= 8.0:  # V10.0: widened (15→8)
                         self.log.info(
-                            "🚨 RSI FILTER: SELL blocked (RSI=%.1f <= 15)",
+                            "🚨 RSI FILTER: SELL blocked (RSI=%.1f <= 8)",
                             rsi_fast_val,
                         )
                         actual_action = ACTION_HOLD
@@ -892,48 +884,8 @@ class LiveEngine:
                         self._radar_active = True  # V2.17: keep radar spinning
                         actual_action = ACTION_HOLD
 
-            # 12e. Elastic Cooldown Reload
-            #   Requires: (1) swing extension > 0.5×ATR from EMA7, then
-            #             (2) pullback to < 0.2×ATR from EMA7
-            if (
-                actual_action in (ACTION_BUY, ACTION_SELL)
-                and not self.risk.has_open_trade
-                and regime in (Regime.TRENDING_UP, Regime.TRENDING_DOWN)
-                and self._last_ema7 > 0
-                and self._current_atr > 0
-            ):
-                _tick_ec = mt5.symbol_info_tick(self.symbol)
-                if _tick_ec is not None:
-                    _tp_ec = float(_tick_ec.bid)
-                    _dist_ec = abs(_tp_ec - self._last_ema7)
-
-                    # Track swing extension
-                    if _dist_ec > 0.5 * self._current_atr:
-                        self._swing_extended = True
-
-                    if not self._swing_extended:
-                        self.log.info(
-                            "🔒 ELASTIC: Swing not extended yet "
-                            "(dist=%.2f < 0.5×ATR=%.2f)",
-                            _dist_ec,
-                            0.5 * self._current_atr,
-                        )
-                        actual_action = ACTION_HOLD
-                    elif _dist_ec > 0.2 * self._current_atr:
-                        self.log.info(
-                            "🔒 ELASTIC: Awaiting pullback "
-                            "(dist=%.2f > 0.2×ATR=%.2f)",
-                            _dist_ec,
-                            0.2 * self._current_atr,
-                        )
-                        actual_action = ACTION_HOLD
-                    else:
-                        self.log.info(
-                            "🔄 ELASTIC RELOAD: Entry cleared "
-                            "(swing OK, pullback dist=%.2f < 0.2×ATR=%.2f)",
-                            _dist_ec,
-                            0.2 * self._current_atr,
-                        )
+            # 12e. V10.0: Elastic Cooldown REMOVED — rapid-fire entry
+            # (TP/SL handles risk; pullback-based timing blocked too many trades)
 
             # 13. Dispatch with position-aware logic  (SRS §5 + §6)
             self._dispatch_action(actual_action, regime, ohlcv, equity)
@@ -1377,14 +1329,10 @@ class LiveEngine:
             )
 
             if actual_action == ACTION_BUY and regime == Regime.TRENDING_UP:
-                if rsi_fast_val >= 85.0:
+                if rsi_fast_val >= 92.0:  # V10.0: widened (85→92)
                     return False
-                ribbon_ok = (
-                    current_ema7 > current_ema20
-                    and ribbon_gap >= 0.1 * self._current_atr
-                    and current_low <= current_ema7 + 0.2 * self._current_atr
-                    and tick_price > current_ema7
-                )
+                # V10.0: Simplified ribbon — trust AI, only check EMA direction
+                ribbon_ok = current_ema7 > current_ema20
                 if not ribbon_ok:
                     self._predictive_cache = {
                         "action": ACTION_BUY,
@@ -1411,14 +1359,10 @@ class LiveEngine:
                 return True
 
             if actual_action == ACTION_SELL and regime == Regime.TRENDING_DOWN:
-                if rsi_fast_val <= 15.0:
+                if rsi_fast_val <= 8.0:  # V10.0: widened (15→8)
                     return False
-                ribbon_ok = (
-                    current_ema7 < current_ema20
-                    and ribbon_gap >= 0.1 * self._current_atr
-                    and current_high >= current_ema7 - 0.2 * self._current_atr
-                    and tick_price < current_ema7
-                )
+                # V10.0: Simplified ribbon — trust AI, only check EMA direction
+                ribbon_ok = current_ema7 < current_ema20
                 if not ribbon_ok:
                     self._predictive_cache = {
                         "action": ACTION_SELL,
@@ -2109,14 +2053,7 @@ class LiveEngine:
                 self._close_and_track("OPPOSITE_SIGNAL")
                 return
 
-        # V3.7: Anti-Machine Gun Cooldown — no re-entry in same bar
-        if self._last_trade_closed_bar_time == self._last_bar_time:
-            self.log.info(
-                "🔒 COOLDOWN: Waiting for next bar before re-entry "
-                "(bar_time=%d)",
-                self._last_bar_time,
-            )
-            return
+        # V3.7→V10.0: Anti-Machine Gun REMOVED — allow same-bar re-entry
 
         # V7.0: Multi-Timeframe Confluence Gate — block entries against H1 trend
         if HTF_CONFLUENCE_ENABLED and self._htf_bias != 0:

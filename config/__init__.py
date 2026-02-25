@@ -117,13 +117,13 @@ MOMENTUM_WINDOW_SEC: float = 3.0        # Time window for velocity measurement
 
 # V3.5 — The 5th Dimension Patch
 REGIME_SHIFT_GRACE_SEC: int = 180        # Shield fresh trades from regime shift (3 minutes)
-VOLUME_ACCEL_MULTIPLIER: float = 1.0    # V9.0: Lowered (1.5→1.0) — sweep confirmed by price, not volume
+VOLUME_ACCEL_MULTIPLIER: float = 0.0    # V10.0: DISABLED (1.0→0) — price action confirms, not volume
 
 # V4.0 — Volume-Kinetic Sizing & Filters
 VOLUME_SMA_PERIOD: int = 10              # Bars for rolling volume average
-VOLUME_SPIKE_MULTIPLIER: float = 0.8    # V9.0: Lowered (1.2→0.8) — Asian session has 40-60% less vol
+VOLUME_SPIKE_MULTIPLIER: float = 0.0    # V10.0: DISABLED (0.8→0) — spread filter protects, volume gates over-block
 MAX_CONSECUTIVE_LOSSES_DIR: int = 2      # Consecutive same-direction losses before penalty
-PENALTY_BOX_MINUTES: int = 30           # Lockout duration for penalized direction
+PENALTY_BOX_MINUTES: int = 10           # V10.0: Shortened (30→10) — faster recovery
 TIME_DECAY_SL_BUMP_RATIO: float = 0.5   # Squeeze SL by this fraction of (entry - SL) distance
 
 # V5.0 — The Alpha HFT Paradigm
@@ -142,7 +142,7 @@ MODIFY_THRESHOLD_POINTS: int = 15       # Skip SL/TP modify if delta < this × p
 MAX_ALLOWED_SPREAD_POINTS: int = 300    # Block entry when spread > this (30 pips for gold)
 
 # V5.3 — The Cache Optimization
-PREDICTIVE_CACHE_TTL_SEC: int = 30       # Cache lifespan (covers M1/M5 candle swings)
+PREDICTIVE_CACHE_TTL_SEC: int = 10       # V10.0: Faster cycling (30→10) — rapid re-evaluation
 
 # V5.4 — The Omniscient Tick-Core Patch
 TICK_POLL_SEC: float = 0.1               # Always-on tick polling interval (100ms)
@@ -153,18 +153,18 @@ DOM_IMBALANCE_THRESHOLD: float = 3.0     # Block entry when opposite DOM volume 
 ADAPTIVE_NORM_ALPHA: float = 0.05        # EMA learning rate for adaptive observation normalization
 
 # V7.0 — The Precision Predator Patch
-HTF_CONFLUENCE_ENABLED: bool = True       # Block entries against H1 trend direction
+HTF_CONFLUENCE_ENABLED: bool = False      # V10.0: DISABLED — trust AI + ATR TP/SL for risk
 HTF_TREND_EMA_PERIOD: int = 50            # H1 EMA period for trend bias detection
 HTF_CACHE_BARS: int = 12                  # Refresh H1 trend every 12 M5 bars (1 hour)
 SPREAD_ATR_FRACTION: float = 0.10         # Training spread simulation: 10% of ATR round-trip
 
 # Inference Safety Guards
 OBS_CLIP_RANGE: float = 10.0             # Hard clip Z-Score features to ± this value
-CONFIDENCE_GATE_PCT: dict[Regime, float] = {   # V7.0: Regime-aware (2-action=60%, 3-action=65%)
-    Regime.TRENDING_UP:     60.0,               # 2-action agent: random baseline 50% (V7.0: raised from 55%)
-    Regime.TRENDING_DOWN:   60.0,               # 2-action agent: random baseline 50% (V7.0: raised from 55%)
-    Regime.MEAN_REVERTING:  65.0,               # 3-action agent: random baseline 33%
-    Regime.HIGH_VOLATILITY: 65.0,               # 3-action agent: random baseline 33%
+CONFIDENCE_GATE_PCT: dict[Regime, float] = {   # V10.0: Lowered for rapid-fire trading
+    Regime.TRENDING_UP:     45.0,               # V10.0: 60→45 (let more signals through)
+    Regime.TRENDING_DOWN:   45.0,               # V10.0: 60→45 (let more signals through)
+    Regime.MEAN_REVERTING:  45.0,               # V10.0: 65→45 (was blocking 60% of MR signals)
+    Regime.HIGH_VOLATILITY: 45.0,               # V10.0: 65→45 (was blocking most HV signals)
 }
 
 # News Filter (Forex Factory calendar — forces HIGH_VOLATILITY before red news)
