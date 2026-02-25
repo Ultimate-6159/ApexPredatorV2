@@ -632,7 +632,7 @@ def display_dashboard(data: DashboardData) -> None:
     exp = _expectancy(trades)
 
     # ── Header ──
-    _header("APEX PREDATOR V7.0 — LIVE PERFORMANCE DASHBOARD")
+    _header("APEX PREDATOR V8.0 — LIVE PERFORMANCE DASHBOARD")
 
     if data.balance_series:
         first_ts = data.balance_series[0][0].strftime("%Y-%m-%d %H:%M")
@@ -892,7 +892,7 @@ def export_csv(trades: Sequence[Trade], path: str) -> None:
 # ══════════════════════════════════════════════
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Apex Predator V7.0 — Live Performance Dashboard",
+        description="Apex Predator V8.0 — Live Performance Dashboard",
     )
     parser.add_argument(
         "--date",

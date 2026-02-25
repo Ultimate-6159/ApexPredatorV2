@@ -249,6 +249,9 @@ def _normalize_obs(
 
     mean = np.array(stats["mean"], dtype=np.float32)
     std = np.array(stats["std"], dtype=np.float32)
+    # V8.0: Dimension guard — old 13-dim stats vs new 16-dim features
+    if len(mean) != len(raw_obs):
+        return raw_obs
     std = np.maximum(std, 0.01)
     return (raw_obs - mean) / (std + 1e-8)
 
@@ -282,7 +285,8 @@ class AdaptiveNormalizer:
 
     def update(self, raw_obs: np.ndarray) -> None:
         """Update running mean/std with a new observation (EMA)."""
-        if not self._initialized:
+        # V8.0: Re-init if feature dimensions changed (13→16 after retrain)
+        if not self._initialized or len(raw_obs) != len(self._mean):
             self._mean = raw_obs.copy().astype(np.float32)
             self._std = np.ones_like(raw_obs, dtype=np.float32)
             self._initialized = True

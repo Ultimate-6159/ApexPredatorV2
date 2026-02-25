@@ -73,11 +73,22 @@ class BaseAgent:
             Frequency of saving logs to file (every N steps).
         """
         logger.info("Training %s for %d timesteps …", self.regime.value, timesteps)
+
+        # V8.0: Tuned defaults for financial RL (overridable via algo_kwargs)
+        default_kwargs: dict[str, Any] = {
+            "learning_rate": 1e-4,      # Slower learning — prevents overshooting
+            "n_steps": 512,             # Shorter rollouts — faster regime adaptation
+            "batch_size": 128,          # Larger batches — smoother gradients
+            "ent_coef": 0.01,           # Exploration bonus — avoids action collapse
+            "gamma": 0.95,              # Shorter discount — matches 5–20 bar trades
+        }
+        default_kwargs.update(self.algo_kwargs)
+
         self.model = self.algo_cls(
             "MlpPolicy",
             env,
             verbose=1,
-            **self.algo_kwargs,
+            **default_kwargs,
         )
 
         # Setup callbacks

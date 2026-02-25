@@ -110,6 +110,7 @@ class StreamingIndicators:
         closes = df["Close"].values.astype(np.float64)
         highs = df["High"].values.astype(np.float64)
         lows = df["Low"].values.astype(np.float64)
+        opens = df["Open"].values.astype(np.float64)
         volumes = df["Volume"].values.astype(np.float64)
         n = len(closes)
 
@@ -267,6 +268,23 @@ class StreamingIndicators:
         # 9. EMA Cross
         ema_cross = np.where(ema_fast_arr > ema_slow_arr, 1.0, -1.0)
 
+        # 10. V8.0: Session awareness (cyclic hour encoding)
+        if isinstance(df.index, pd.DatetimeIndex):
+            hour_frac = (
+                df.index.hour.values.astype(np.float64)
+                + df.index.minute.values.astype(np.float64) / 60.0
+            )
+        else:
+            hour_frac = np.zeros(n)
+        hour_sin = np.sin(2.0 * np.pi * hour_frac / 24.0)
+        hour_cos = np.cos(2.0 * np.pi * hour_frac / 24.0)
+
+        # 11. V8.0: Candle body ratio (conviction measure)
+        candle_range = highs - lows
+        body_ratio = np.where(
+            candle_range > 0, np.abs(closes - opens) / candle_range, 0.0
+        )
+
         # Build DataFrame
         feat = pd.DataFrame(
             {
@@ -283,6 +301,9 @@ class StreamingIndicators:
                 "volume_zscore": vol_zscore,
                 "close_return": close_return,
                 "ema_cross": ema_cross,
+                "hour_sin": hour_sin,
+                "hour_cos": hour_cos,
+                "body_ratio": body_ratio,
             },
             index=df.index,
         )
@@ -334,6 +355,7 @@ class StreamingIndicators:
         h = float(latest["High"])
         l = float(latest["Low"])
         c = float(latest["Close"])
+        o = float(latest["Open"])
         v = float(latest["Volume"])
         change = c - self._prev_close
 
@@ -427,6 +449,19 @@ class StreamingIndicators:
         # EMA cross
         ema_cross = 1.0 if self._ema_fast > self._ema_slow else -1.0
 
+        # V8.0: Session awareness (cyclic hour encoding)
+        ts = df.index[-1]
+        if hasattr(ts, 'hour'):
+            hour_frac = float(ts.hour) + float(ts.minute) / 60.0
+        else:
+            hour_frac = 0.0
+        hour_sin = float(np.sin(2.0 * np.pi * hour_frac / 24.0))
+        hour_cos = float(np.cos(2.0 * np.pi * hour_frac / 24.0))
+
+        # V8.0: Candle body ratio (conviction measure)
+        candle_range = h - l
+        body_ratio = abs(c - o) / candle_range if candle_range > 0 else 0.0
+
         # Update previous bar
         self._prev_close = c
         self._prev_high = h
@@ -447,6 +482,9 @@ class StreamingIndicators:
             "volume_zscore": vol_zscore,
             "close_return": close_return,
             "ema_cross": ema_cross,
+            "hour_sin": hour_sin,
+            "hour_cos": hour_cos,
+            "body_ratio": body_ratio,
         }
         # Sanitize
         for k, val in feat.items():
@@ -544,7 +582,7 @@ class PerceptionEngine:
 
     # ── Feature Engineering (V6.0: streaming) ─────────
     def compute_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Compute 13 normalised, noise-free features.
+        """Compute 16 normalised, noise-free features.
 
         V6.0: Delegates to StreamingIndicators for zero-latency
         numpy-based computation with incremental updates.

@@ -58,8 +58,8 @@ _ENTRY_COST: dict[Regime, float] = {
 
 # Hold-while-flat reward per regime (replaces global _HOLD_FLAT_PENALTY)
 _HOLD_FLAT_REWARD: dict[Regime, float] = {
-    Regime.TRENDING_UP:     -0.001,         # Slight penalty — should enter trends
-    Regime.TRENDING_DOWN:   -0.001,         # Slight penalty — should enter trends
+    Regime.TRENDING_UP:     -0.005,         # V8.0: 5× stronger — trends punish inaction
+    Regime.TRENDING_DOWN:   -0.005,         # V8.0: 5× stronger — trends punish inaction
     Regime.MEAN_REVERTING:   0.01,          # Patience reward — wait for edge
     Regime.HIGH_VOLATILITY:  0.005,         # Small patience reward — wait for clean setup
 }
@@ -124,11 +124,27 @@ class TradingEnv(gym.Env):
         self.hold_flat_reward = _HOLD_FLAT_REWARD[regime]
         self.cooldown_bars = _COOLDOWN_BARS[regime]
 
-        # Pre-compute rolling ATR (same as backtest engine)
-        hl_range = (self.ohlcv["High"] - self.ohlcv["Low"]).rolling(_ATR_PERIOD).mean()
-        self._atr_series: np.ndarray = hl_range.fillna(
-            self.ohlcv["Close"] * 0.01
-        ).values.astype(np.float64)
+        # Pre-compute True Range + Wilder ATR (V8.0: matches live engine)
+        # V7.0 fixed ATR in live but training still used (H-L) avg which
+        # ignores gap moves and systematically underestimates volatility.
+        _closes = self.ohlcv["Close"].values.astype(np.float64)
+        _highs = self.ohlcv["High"].values.astype(np.float64)
+        _lows = self.ohlcv["Low"].values.astype(np.float64)
+        _n = len(_closes)
+        _tr = np.empty(_n)
+        _tr[0] = _highs[0] - _lows[0]
+        for _i in range(1, _n):
+            _tr[_i] = max(
+                _highs[_i] - _lows[_i],
+                abs(_highs[_i] - _closes[_i - 1]),
+                abs(_lows[_i] - _closes[_i - 1]),
+            )
+        _alpha = 1.0 / _ATR_PERIOD
+        _atr = np.empty(_n)
+        _atr[0] = _tr[0]
+        for _i in range(1, _n):
+            _atr[_i] = _alpha * _tr[_i] + (1 - _alpha) * _atr[_i - 1]
+        self._atr_series: np.ndarray = _atr
 
         # Episode state
         self._current_step: int = 0

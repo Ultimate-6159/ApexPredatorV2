@@ -176,7 +176,7 @@ NEWS_CACHE_HOURS: int = 4                # Re-fetch calendar interval
 # ──────────────────────────────────────────────
 # Training
 # ──────────────────────────────────────────────
-TRAINING_TIMESTEPS: int = 200_000
+TRAINING_TIMESTEPS: int = 500_000    # V8.0: 2.5× more steps for 16-feature space
 MODEL_DIR: str = "models"
 
 # ──────────────────────────────────────────────
